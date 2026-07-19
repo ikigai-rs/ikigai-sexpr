@@ -1,0 +1,37 @@
+# CI for ikigai-sexpr. The `Sexpr` datum, reader, printer, and `sexpr_to_sparql`
+# compiler are pure Rust; the `urn:sparql:from-sexpr` endpoint depends only on the
+# (wasm-clean) `ikigai-core` kernel — so the crate has a genuine browser face (compile
+# an s-expr query to SPARQL client-side). Check both faces: native --all-targets +
+# tests, and a wasm lib build so browser drift can't slip into the publish cascade.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+
+      - name: fmt
+        run: cargo fmt --all -- --check
+
+      - name: clippy (native, all targets)
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: test
+        run: cargo test
+
+      # The browser face: the lib must still compile to wasm32 (the endpoint's only
+      # dependency, ikigai-core, is wasm-clean; the dev-dep SPARQL engine is not
+      # compiled for --lib).
+      - name: clippy (wasm lib)
+        run: cargo clippy --lib --target wasm32-unknown-unknown -- -D warnings
