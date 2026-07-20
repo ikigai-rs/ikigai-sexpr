@@ -7,18 +7,25 @@
 //!    with a recursive-descent [`parse`] reader and a round-tripping [`write`] printer.
 //!    Pure Rust, no dependencies. Every lisp/reader adapts *into* this; the transreptor
 //!    reads s-expr *text* with no lisp engine at all.
-//! 2. **The compiler** — [`sexpr_to_sparql`], a **pure, kernel-free** total function
-//!    `&Sexpr → String` that turns a query-shaped s-expression into a SPARQL SELECT.
-//!    Lifted (in logic) from `ikigai-lisp`'s Steel-coupled compiler, retyped onto
-//!    [`Sexpr`] so it carries no eval/channel/capability concern. String literals and
-//!    IRIs are **escaped/validated, never interpolated** — a term can never break out and
-//!    inject query syntax — and any malformed input is a clear [`SexprError`], never a
-//!    panic. Clauses may appear in any order; output is emitted in canonical order.
-//! 3. **The endpoint** — [`urn:sparql:from-sexpr`](space), a first-class `ik:Transreptor`
-//!    (`text/x-sexpr` → `application/sparql-query`) that `parse`s a piped s-expr query and
-//!    compiles it. This is the only layer that depends on `ikigai-core`.
+//! 2. **The compilers** — two **pure, kernel-free** total functions `&Sexpr → String`,
+//!    sharing one term-rendering core (IRI validation + literal escaping):
+//!    - [`sexpr_to_sparql`] turns a query-shaped s-expression into a SPARQL SELECT.
+//!      Lifted (in logic) from `ikigai-lisp`'s Steel-coupled compiler, retyped onto
+//!      [`Sexpr`] so it carries no eval/channel/capability concern.
+//!    - [`sexpr_to_turtle`] turns a graph-shaped s-expression into RDF **Turtle**.
 //!
-//! ## The accepted query grammar
+//!    In both, string literals and IRIs are **escaped/validated, never interpolated** — a
+//!    term can never break out and inject syntax — and any malformed input is a clear
+//!    [`SexprError`], never a panic. Clauses may appear in any order; output is emitted in
+//!    canonical order.
+//! 3. **The endpoints** — two first-class `ik:Transreptor`s, the only layer that depends
+//!    on `ikigai-core`: [`urn:sparql:from-sexpr`](space) (`text/x-sexpr` →
+//!    `application/sparql-query`, requires a `(select …)`) and `urn:rdf:from-sexpr`
+//!    (`text/x-sexpr` → `text/turtle`, requires a `(graph …)`). Both read the same
+//!    `text/x-sexpr` input; they disambiguate by **output media type** *and* by the
+//!    document's **head symbol** (`select` vs `graph`) — each errors on the wrong head.
+//!
+//! ## The accepted query grammar (`sexpr_to_sparql`)
 //!
 //! ```text
 //! (select (?a ?b …) | *          ; projection: a var list, or * for all
@@ -32,6 +39,23 @@
 //! The head symbol must be `select`; an unknown head, a malformed clause, or an
 //! unsupported term yields an `Err`. The emitted query always orders its parts
 //! canonically: PREFIX → SELECT/WHERE → ORDER BY → LIMIT.
+//!
+//! ## The accepted graph grammar (`sexpr_to_turtle`)
+//!
+//! ```text
+//! (graph
+//!   (prefix (ex "http://example.org/") …)   ; optional PREFIX bindings (0 or more clauses)
+//!   (ex:alice a foaf:Person)                ; each remaining form is one triple (S P O)
+//!   (ex:alice foaf:name "Alice")            ;   S/P = pfx:local | (iri "…")
+//!   (ex:alice foaf:age 42)                  ;   O   = S-terms | "string" | integer
+//!   (ex:alice ex:score (lit "3.14" xsd:decimal))   ;       | (lit "v" pfx:dt) typed
+//!   (ex:alice foaf:name (lit "Alix" @fr)))         ;       | (lit "v" @lang)  language-tagged
+//! ```
+//!
+//! The head symbol must be `graph`. `a` in predicate position renders as `rdf:type` and
+//! auto-binds the `rdf:` prefix. **No blank nodes** — a `_:x` form is rejected; every node
+//! must be a stable IRI (skolemize). The emitted Turtle is canonical: `@prefix` lines, then
+//! one `S P O .` statement per triple, each newline-terminated. It always parses as RDF.
 
 #![forbid(unsafe_code)]
 
@@ -43,15 +67,21 @@ use ikigai_core::{
 
 /// The s-expression media type this crate reads: an s-expr *document* as UTF-8 text.
 /// Human-readable and reader-neutral, so `text/x-*` (the conventional unregistered-text
-/// space) fits. The transreptor requires the document to be a **query form** (a
-/// `(select …)`); see the [crate] grammar.
+/// space) fits. Both transreptors read it; each requires a particular top form — a
+/// `(select …)` for [`urn:sparql:from-sexpr`](space), a `(graph …)` for `urn:rdf:from-sexpr`.
 pub const MEDIA_SEXPR: &str = "text/x-sexpr";
 
-/// The output media type: the IANA-registered SPARQL query type.
+/// The output media type of the query transreptor: the IANA-registered SPARQL query type.
 pub const MEDIA_SPARQL_QUERY: &str = "application/sparql-query";
+
+/// The output media type of the graph transreptor: RDF Turtle.
+pub const MEDIA_TURTLE: &str = "text/turtle";
 
 /// The XSD `string` datatype IRI — the `class` of the s-expression input.
 const XSD_STRING: &str = "http://www.w3.org/2001/XMLSchema#string";
+
+/// The RDF namespace — auto-bound as the `rdf:` prefix when `a` (→ `rdf:type`) is used.
+const RDF_NS: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#";
 
 // =====================================================================================
 // The datum — a neutral s-expression AST.
@@ -93,6 +123,17 @@ impl std::fmt::Display for SexprError {
 }
 
 impl std::error::Error for SexprError {}
+
+impl SexprError {
+    /// The human-readable detail, without the surface label [`Display`](std::fmt::Display)
+    /// prepends. Lets an endpoint compose its own prefix (e.g. `urn:rdf:from-sexpr: …`)
+    /// without doubling a compiler-specific label.
+    pub fn detail(&self) -> &str {
+        match self {
+            SexprError::Parse(m) | SexprError::Compile(m) => m,
+        }
+    }
+}
 
 /// The pure layers' result type.
 pub type SexprResult<T> = std::result::Result<T, SexprError>;
@@ -654,20 +695,240 @@ fn valid_pn_local(local: &str) -> bool {
         .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
-/// A compile-time error from [`sexpr_to_sparql`] — never a panic.
+/// A compile-time error from either compiler — never a panic.
 fn compile_err(msg: &str) -> SexprError {
     SexprError::Compile(msg.to_string())
 }
 
 // =====================================================================================
-// The endpoint — `urn:sparql:from-sexpr`, the only ikigai-core-dependent layer.
+// The graph compiler — a pure `&Sexpr` → Turtle `String`, kernel-free.
+//
+// The graph-authoring surface: an s-expression naming a fixed schema (RDF's own data
+// model) compiles to canonical Turtle. It shares the SPARQL compiler's term-rendering
+// core — `render_iri` (IRIREF validation) and `render_string_literal` (literal escaping)
+// — so IRIs and literals are escaped/validated, never interpolated. Any malformed input
+// is a clear [`SexprError`]; every success is valid RDF. NO blank nodes: skolemize to a
+// stable IRI (a `_:x` form is rejected).
 // =====================================================================================
 
-/// Mount the module at its conventional IRI (`urn:sparql:from-sexpr`). A host links this
-/// crate and mounts the returned space to give the kernel a language-agnostic
-/// `text/x-sexpr → application/sparql-query` transreptor.
+/// Compile a graph-shaped s-expression into an RDF **Turtle** document.
+///
+/// The accepted grammar is documented on the [crate] docs. The head symbol must be
+/// `graph`; an unknown head, a malformed clause/triple, a blank-node form, or an
+/// unsupported term yields an `Err`. Output is canonical: `@prefix` lines (in declaration
+/// order, plus an auto-bound `rdf:` if `a`/`rdf:type` is used), then one newline-terminated
+/// `S P O .` statement per triple.
+pub fn sexpr_to_turtle(value: &Sexpr) -> SexprResult<String> {
+    let items = list_items(value)
+        .ok_or_else(|| compile_err("a graph must be a list, e.g. (graph (ex:s ex:p ex:o))"))?;
+    let head = items
+        .first()
+        .and_then(|v| symbol_name(v))
+        .ok_or_else(|| compile_err("a graph must start with a head symbol (`graph`)"))?;
+    if head != "graph" {
+        return Err(compile_err(&format!(
+            "unknown graph head `{head}`; only `graph` is supported"
+        )));
+    }
+    compile_graph(&items[1..])
+}
+
+/// Compile the body of a `(graph …)` form: zero or more `(prefix …)` clauses interleaved
+/// with `(S P O)` triples. A form is a prefix clause iff its head symbol is `prefix`
+/// (never a valid subject, so the dispatch is unambiguous); every other form is a triple.
+fn compile_graph(rest: &[&Sexpr]) -> SexprResult<String> {
+    let mut prefix_lines: Vec<String> = Vec::new();
+    let mut declared_rdf = false;
+    let mut triples: Vec<String> = Vec::new();
+    let mut used_rdf_type = false;
+
+    for form in rest {
+        let fitems = list_items(form).ok_or_else(|| {
+            compile_err("each graph form must be a list — a triple (S P O) or (prefix …)")
+        })?;
+        if fitems.first().and_then(|v| symbol_name(v)) == Some("prefix") {
+            for binding in &fitems[1..] {
+                let (pfx, line) = compile_turtle_prefix(binding)?;
+                if pfx == "rdf" {
+                    declared_rdf = true;
+                }
+                prefix_lines.push(line);
+            }
+        } else {
+            triples.push(compile_graph_triple(&fitems, &mut used_rdf_type)?);
+        }
+    }
+
+    // `a`/`rdf:type` was used but the author didn't declare `rdf:` — auto-bind it, so the
+    // emitted Turtle is self-contained and parses.
+    if used_rdf_type && !declared_rdf {
+        prefix_lines.push(format!("@prefix rdf: <{RDF_NS}> ."));
+    }
+
+    let mut out = String::new();
+    for line in &prefix_lines {
+        out.push_str(line);
+        out.push('\n');
+    }
+    for triple in &triples {
+        out.push_str(triple);
+        out.push('\n');
+    }
+    Ok(out)
+}
+
+/// A `(prefix (pfx "http://…"))` binding → the prefix label and a `@prefix pfx: <http://…> .`
+/// line. The name may be written `pfx` or `pfx:` (the colon is added on emit).
+fn compile_turtle_prefix(value: &Sexpr) -> SexprResult<(String, String)> {
+    let items = list_items(value)
+        .ok_or_else(|| compile_err("a prefix binding must be a list (pfx \"http://…\")"))?;
+    if items.len() != 2 {
+        return Err(compile_err("a prefix binding is (pfx \"http://…\")"));
+    }
+    let raw = symbol_name(items[0])
+        .ok_or_else(|| compile_err("prefix name must be a symbol, e.g. ex"))?;
+    let pfx = raw.strip_suffix(':').unwrap_or(raw);
+    if !valid_pn_prefix(pfx) {
+        return Err(compile_err(&format!("invalid prefix name `{pfx}`")));
+    }
+    let iri = match items[1] {
+        Sexpr::Str(s) => render_iri(s)?,
+        _ => return Err(compile_err("a prefix namespace must be a string IRI")),
+    };
+    Ok((pfx.to_string(), format!("@prefix {pfx}: {iri} .")))
+}
+
+/// A single triple `(S P O)` → `S P O .`. Sets `used_rdf_type` when the `a` predicate
+/// keyword is encountered (so the caller can auto-bind `rdf:`).
+fn compile_graph_triple(terms: &[&Sexpr], used_rdf_type: &mut bool) -> SexprResult<String> {
+    if terms.len() != 3 {
+        return Err(compile_err(
+            "a triple must have exactly three terms (S P O)",
+        ));
+    }
+    let s = render_graph_iri(terms[0], "subject")?;
+    let p = render_graph_predicate(terms[1], used_rdf_type)?;
+    let o = render_graph_object(terms[2])?;
+    Ok(format!("{s} {p} {o} ."))
+}
+
+/// A node in IRI position (subject, or a non-`a` predicate): a `pfx:local` prefixed name or
+/// an `(iri "…")` form. Variables, literals, and blank nodes are rejected — the last with a
+/// pointed "skolemize" message. `role` names the position for the error text.
+fn render_graph_iri(value: &Sexpr, role: &str) -> SexprResult<String> {
+    match value {
+        Sexpr::Symbol(s) => {
+            if s.starts_with("_:") {
+                return Err(compile_err(
+                    "blank nodes are not allowed — skolemize to a stable IRI (pfx:local or (iri \"…\"))",
+                ));
+            }
+            if is_var(s) {
+                return Err(compile_err(&format!(
+                    "a {role} must be an IRI, not the variable `{s}`"
+                )));
+            }
+            if is_prefixed_name(s) {
+                Ok(s.to_string())
+            } else {
+                Err(compile_err(&format!(
+                    "unrecognized {role} `{s}`; use pfx:local or (iri \"…\")"
+                )))
+            }
+        }
+        Sexpr::List(items) => {
+            let items: Vec<&Sexpr> = items.iter().collect();
+            match items.first().and_then(|v| symbol_name(v)) {
+                Some("iri") => render_iri_form(&items[1..]),
+                Some(other) => Err(compile_err(&format!(
+                    "unknown {role} form `({other} …)`; only (iri \"…\") is an IRI form"
+                ))),
+                None => Err(compile_err(&format!(
+                    "a compound {role} must start with a symbol, e.g. (iri \"…\")"
+                ))),
+            }
+        }
+        _ => Err(compile_err(&format!(
+            "a {role} must be an IRI (pfx:local or (iri \"…\")), not a literal"
+        ))),
+    }
+}
+
+/// A predicate node: the bare `a` keyword (→ `rdf:type`, flagging `used_rdf_type`) or an IRI.
+fn render_graph_predicate(value: &Sexpr, used_rdf_type: &mut bool) -> SexprResult<String> {
+    if symbol_name(value) == Some("a") {
+        *used_rdf_type = true;
+        return Ok("rdf:type".to_string());
+    }
+    render_graph_iri(value, "predicate")
+}
+
+/// An object node: an IRI (as a subject), or a literal — a bare `"string"`, an integer, or a
+/// typed/language-tagged `(lit "v" pfx:dt)` / `(lit "v" @lang)` form.
+fn render_graph_object(value: &Sexpr) -> SexprResult<String> {
+    match value {
+        Sexpr::Str(s) => Ok(render_string_literal(s)),
+        Sexpr::Int(n) => Ok(n.to_string()),
+        Sexpr::Symbol(_) => render_graph_iri(value, "object"),
+        Sexpr::List(items) => {
+            let items: Vec<&Sexpr> = items.iter().collect();
+            match items.first().and_then(|v| symbol_name(v)) {
+                Some("iri") => render_iri_form(&items[1..]),
+                Some("lit") => render_lit_form(&items[1..]),
+                Some(other) => Err(compile_err(&format!(
+                    "unknown object form `({other} …)`; expected (iri \"…\") or (lit \"v\" dt)"
+                ))),
+                None => Err(compile_err(
+                    "a compound object must start with a symbol, e.g. (iri \"…\") or (lit …)",
+                )),
+            }
+        }
+    }
+}
+
+/// A `(lit "value" pfx:datatype)` or `(lit "value" @lang)` body → a typed/lang Turtle
+/// literal. The value is escaped (never interpolated); the datatype is a validated IRI
+/// (`pfx:local` or `(iri "…")`), the language tag a validated BCP-47-ish `@subtag`.
+fn render_lit_form(args: &[&Sexpr]) -> SexprResult<String> {
+    if args.len() != 2 {
+        return Err(compile_err(
+            "(lit …) takes a value and a datatype/lang, e.g. (lit \"3.14\" xsd:decimal) or (lit \"hi\" @en)",
+        ));
+    }
+    let value = match args[0] {
+        Sexpr::Str(s) => render_string_literal(s),
+        _ => return Err(compile_err("(lit …) value must be a string literal")),
+    };
+    match args[1] {
+        // Language tag: a symbol `@subtag` (letters/digits/hyphen after the `@`).
+        Sexpr::Symbol(tag) if tag.starts_with('@') => {
+            let sub = &tag[1..];
+            if sub.is_empty() || !sub.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+                return Err(compile_err(&format!("invalid language tag `{tag}`")));
+            }
+            Ok(format!("{value}{tag}"))
+        }
+        // Datatype IRI: pfx:local or (iri "…").
+        other => {
+            let dt = render_graph_iri(other, "datatype")?;
+            Ok(format!("{value}^^{dt}"))
+        }
+    }
+}
+
+// =====================================================================================
+// The endpoints — `urn:sparql:from-sexpr` / `urn:rdf:from-sexpr`, the only
+// ikigai-core-dependent layer.
+// =====================================================================================
+
+/// Mount the module at its conventional IRIs. A host links this crate and mounts the
+/// returned space to give the kernel two language-agnostic transreptors: the query surface
+/// `urn:sparql:from-sexpr` (`text/x-sexpr → application/sparql-query`) and the
+/// graph-authoring surface `urn:rdf:from-sexpr` (`text/x-sexpr → text/turtle`).
 pub fn space() -> EndpointSpace {
-    EndpointSpace::new().bind(Exact::new("urn:sparql:from-sexpr"), FromSexpr)
+    EndpointSpace::new()
+        .bind(Exact::new("urn:sparql:from-sexpr"), FromSexpr)
+        .bind(Exact::new("urn:rdf:from-sexpr"), FromSexprTurtle)
 }
 
 /// The `urn:sparql:from-sexpr` transreptor: read an s-expr query TEXT (piped `content`, or
@@ -680,7 +941,7 @@ struct FromSexpr;
 #[async_trait]
 impl Endpoint for FromSexpr {
     async fn invoke(&self, inv: &Invocation<'_>) -> CoreResult<Representation> {
-        let src = read_source(inv)?;
+        let src = read_source(inv, "urn:sparql:from-sexpr")?;
         let sexpr =
             parse(src).map_err(|e| CoreError::Endpoint(format!("urn:sparql:from-sexpr: {e}")))?;
         let sparql = sexpr_to_sparql(&sexpr)
@@ -728,17 +989,77 @@ impl Endpoint for FromSexpr {
     }
 }
 
+/// The `urn:rdf:from-sexpr` transreptor: read an s-expr graph TEXT (piped `content`, or a
+/// named `in`), [`parse`] it, [`sexpr_to_turtle`] it, and emit the Turtle. A first-class
+/// `ik:Transreptor` (`text/x-sexpr` → `text/turtle`) — no lisp engine involved. Shares the
+/// `text/x-sexpr` input with [`FromSexpr`]; the two disambiguate by output media type and by
+/// the document head (`graph` here, `select` there), so each errors on the wrong form. Pure
+/// function of its input bytes, so its result is `.cacheable()`.
+struct FromSexprTurtle;
+
+#[async_trait]
+impl Endpoint for FromSexprTurtle {
+    async fn invoke(&self, inv: &Invocation<'_>) -> CoreResult<Representation> {
+        let src = read_source(inv, "urn:rdf:from-sexpr")?;
+        let sexpr = parse(src)
+            .map_err(|e| CoreError::Endpoint(format!("urn:rdf:from-sexpr: {}", e.detail())))?;
+        let turtle = sexpr_to_turtle(&sexpr)
+            .map_err(|e| CoreError::Endpoint(format!("urn:rdf:from-sexpr: {}", e.detail())))?;
+        Ok(Representation::new(
+            ReprType::new(MEDIA_TURTLE).with_param("charset", "utf-8"),
+            turtle.into_bytes(),
+        )
+        .cacheable())
+    }
+
+    fn name(&self) -> &str {
+        "rdf-from-sexpr"
+    }
+
+    fn describe(&self) -> Description {
+        Description::new("rdf-from-sexpr")
+            .title("RDF (Turtle) from s-expression")
+            .summary(
+                "Compile an s-expression graph into RDF Turtle — a language-agnostic \
+                 transreptor with no lisp engine. Pipe an s-expr graph in (or pass `in=`); the \
+                 form is `(graph (prefix (pfx \"…\")…) (S P O)…)` where S/P are pfx:local or \
+                 (iri \"…\") and O adds \"string\"/integer/(lit \"v\" dt) literals. `a` renders \
+                 as rdf:type (rdf: auto-bound); NO blank nodes (skolemize). String literals and \
+                 IRIs are escaped/validated, never interpolated; a malformed graph is a clean \
+                 error. Output is text/turtle — feed it to urn:rdf:* to convert or store.",
+            )
+            .verb(Verb::Source)
+            .verb(Verb::Meta)
+            .input(
+                ArgSpec::new("content")
+                    .summary("the s-expression graph TEXT to compile — usually piped in")
+                    .class(XSD_STRING),
+            )
+            .input(
+                ArgSpec::new("in")
+                    .summary(
+                        "the s-expression graph TEXT (positional/named alternative to content)",
+                    )
+                    .class(XSD_STRING)
+                    .optional(),
+            )
+            .output(MEDIA_TURTLE)
+            // First-class `ik:Transreptor`: an s-expr graph document → RDF Turtle.
+            .transreptor([MEDIA_SEXPR], [MEDIA_TURTLE])
+    }
+}
+
 /// The s-expr source: piped `content` (the transreptor/pipeline convention — a stage piped
-/// into `urn:sparql:from-sexpr` arrives as `content`), falling back to a named `in`.
-fn read_source<'a>(inv: &'a Invocation<'_>) -> CoreResult<&'a str> {
+/// into a from-sexpr transreptor arrives as `content`), falling back to a named `in`. `iri`
+/// names the endpoint for the "no input" error.
+fn read_source<'a>(inv: &'a Invocation<'_>, iri: &str) -> CoreResult<&'a str> {
     match inv.inline_str("content") {
         Ok(src) => Ok(src),
         Err(_) => inv.inline_str("in").map_err(|_| {
-            CoreError::Endpoint(
-                "urn:sparql:from-sexpr needs an s-expr query — pipe one in (e.g. \
-                 `source <sexpr> | urn:sparql:from-sexpr`) or pass `in=…`"
-                    .to_string(),
-            )
+            CoreError::Endpoint(format!(
+                "{iri} needs an s-expr document — pipe one in (e.g. \
+                 `source <sexpr> | {iri}`) or pass `in=…`"
+            ))
         }),
     }
 }
