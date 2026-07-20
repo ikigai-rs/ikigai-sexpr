@@ -566,3 +566,328 @@ mod turtle_endpoint {
         assert!(!in_arg.required);
     }
 }
+
+// ---- slice 3c.2: the LOSSLESS code-as-graph codec ---------------------------
+
+mod code_graph {
+    use super::*;
+    use oxrdf::Term;
+    use oxrdfio::{RdfFormat, RdfParser};
+    use std::collections::HashSet;
+
+    /// Parse code-graph Turtle into `(subject, predicate, object)` string triples. Subjects/
+    /// objects are their IRIs; a literal object becomes `LIT[<datatype>]<value>`; a blank node
+    /// becomes `_:…` (so the skolem test can detect one). Panics if the Turtle is not valid RDF.
+    fn parse_ttl(ttl: &str) -> Vec<(String, String, String)> {
+        use oxrdf::NamedOrBlankNode;
+        let mut out = Vec::new();
+        for q in RdfParser::from_format(RdfFormat::Turtle).for_slice(ttl.as_bytes()) {
+            let q = q.expect("emitted code-graph must be valid RDF");
+            let s = match q.subject {
+                NamedOrBlankNode::NamedNode(n) => n.as_str().to_string(),
+                NamedOrBlankNode::BlankNode(b) => format!("_:{}", b.as_str()),
+            };
+            let o = match q.object {
+                Term::NamedNode(n) => n.as_str().to_string(),
+                Term::Literal(l) => format!("LIT[{}]{}", l.datatype().as_str(), l.value()),
+                Term::BlankNode(b) => format!("_:{}", b.as_str()),
+            };
+            out.push((s, q.predicate.as_str().to_string(), o));
+        }
+        out
+    }
+
+    fn assert_round_trips(s: &Sexpr) {
+        let ttl = sexpr_to_rdf(s).unwrap();
+        let back = rdf_to_sexpr(&ttl).unwrap();
+        assert_eq!(
+            &back, s,
+            "round-trip failed for {s:?}\n--- turtle ---\n{ttl}"
+        );
+    }
+
+    #[test]
+    fn round_trips_the_full_corpus_exactly() {
+        // Each atom kind; the empty list; nesting; a REPEATED sub-list (content-addressing
+        // must still reconstruct both occurrences); and a real program (the 3a/3b shape).
+        let corpus = vec![
+            Sexpr::Symbol("select".into()),            // top-level symbol atom
+            Sexpr::Str("hello \"world\"\n\tπ".into()), // string with escapes + unicode
+            Sexpr::Int(42),                            // positive int
+            Sexpr::Int(-7),                            // negative int
+            Sexpr::List(Vec::new()),                   // ()
+            parse("(a b c)").unwrap(),                 // flat list
+            parse("(a (b (c) d) e)").unwrap(),         // nested
+            parse("((x y) (x y))").unwrap(),           // repeated sub-list (dedup)
+            parse(r#"(sink "urn:x" 42)"#).unwrap(),    // the brief's worked example
+            parse("(select (?s ?p ?o) (where (?s ?p ?o)) (limit 10))").unwrap(), // a program
+        ];
+        for s in &corpus {
+            assert_round_trips(s);
+        }
+    }
+
+    #[test]
+    fn encoding_is_deterministic_byte_for_byte() {
+        // Same datum → byte-identical Turtle, every time (content-addressed + sorted output).
+        let s = parse("(select (?s ?p ?o) (where (?s ?p ?o)) (limit 10))").unwrap();
+        let a = sexpr_to_rdf(&s).unwrap();
+        let b = sexpr_to_rdf(&s).unwrap();
+        assert_eq!(a, b);
+        // Two independently-built EQUAL datums also encode identically (structural, not identity).
+        let s2 = parse("(select (?s ?p ?o) (where (?s ?p ?o)) (limit 10))").unwrap();
+        assert_eq!(sexpr_to_rdf(&s2).unwrap(), a);
+    }
+
+    #[test]
+    fn a_repeated_sub_list_shares_one_content_addressed_node() {
+        // `((x y) (x y))`: the two `(x y)` sub-lists MUST collapse to a single shared cons node
+        // (its IRI is the hash of the subtree). Proves content-addressing / structural dedup.
+        let s = parse("((x y) (x y))").unwrap();
+        let ttl = sexpr_to_rdf(&s).unwrap();
+        let quads = parse_ttl(&ttl);
+
+        // Exactly four DISTINCT cons nodes: the two outer cells + the ONE shared `(x y)` head
+        // + its `(y)` tail. Without sharing there would be six.
+        let cons_subjects: HashSet<&String> = quads
+            .iter()
+            .map(|(subj, _, _)| subj)
+            .filter(|subj| {
+                subj.starts_with(SEXPR_NODE_PREFIX) && subj.as_str() != "urn:sexpr:document"
+            })
+            .collect();
+        assert_eq!(
+            cons_subjects.len(),
+            4,
+            "expected 4 distinct cons nodes (the two (x y) sharing one), got {cons_subjects:?}"
+        );
+
+        // The two outer cells' `rdf:first` both point at the SAME `(x y)` node IRI.
+        let first_refs: Vec<&String> = quads
+            .iter()
+            .filter(|(_, p, o)| p == RDF_FIRST && o.starts_with(SEXPR_NODE_PREFIX))
+            .map(|(_, _, o)| o)
+            .collect();
+        assert_eq!(first_refs.len(), 2, "two references to (x y) expected");
+        assert_eq!(
+            first_refs[0], first_refs[1],
+            "the repeated sub-list must resolve to ONE shared IRI"
+        );
+    }
+
+    #[test]
+    fn the_code_graph_is_skolemized_no_blank_nodes() {
+        let s = parse("(a (b c) (b c) () (d (e)))").unwrap();
+        let ttl = sexpr_to_rdf(&s).unwrap();
+        assert!(
+            !ttl.contains("_:"),
+            "no `_:` bnode syntax in the Turtle:\n{ttl}"
+        );
+        for (subj, _, obj) in parse_ttl(&ttl) {
+            assert!(!subj.starts_with("_:"), "blank-node subject {subj}");
+            assert!(!obj.starts_with("_:"), "blank-node object {obj}");
+        }
+    }
+
+    #[test]
+    fn atoms_carry_their_distinguishing_datatypes() {
+        // A symbol and a string with the SAME text must NOT collapse — the datatype separates
+        // them, so each round-trips to its own kind.
+        let ttl_sym = sexpr_to_rdf(&Sexpr::Symbol("x".into())).unwrap();
+        let ttl_str = sexpr_to_rdf(&Sexpr::Str("x".into())).unwrap();
+        assert!(ttl_sym.contains("^^sx:symbol"), "{ttl_sym}");
+        assert!(ttl_str.contains("^^xsd:string"), "{ttl_str}");
+        assert_ne!(ttl_sym, ttl_str);
+        assert_eq!(rdf_to_sexpr(&ttl_sym).unwrap(), Sexpr::Symbol("x".into()));
+        assert_eq!(rdf_to_sexpr(&ttl_str).unwrap(), Sexpr::Str("x".into()));
+    }
+
+    #[test]
+    fn the_worked_example_encodes_to_the_expected_shape() {
+        // `(sink "urn:x" 42)` — assert the concrete triples, datatypes and the document root,
+        // then that it round-trips.
+        let s = parse(r#"(sink "urn:x" 42)"#).unwrap();
+        let ttl = sexpr_to_rdf(&s).unwrap();
+        let quads = parse_ttl(&ttl);
+
+        // root marker
+        assert!(quads
+            .iter()
+            .any(|(su, p, _)| su == "urn:sexpr:document" && p == SX_ROOT));
+        // the three heads, by datatype
+        let objs: Vec<&String> = quads
+            .iter()
+            .filter(|(_, p, _)| p == RDF_FIRST)
+            .map(|(_, _, o)| o)
+            .collect();
+        assert!(
+            objs.contains(&&format!("LIT[{SX_SYMBOL}]sink")),
+            "objs: {objs:?}"
+        );
+        assert!(
+            objs.contains(&&format!("LIT[{XSD_STRING}]urn:x")),
+            "objs: {objs:?}"
+        );
+        assert!(
+            objs.contains(&&format!("LIT[{XSD_INTEGER}]42")),
+            "objs: {objs:?}"
+        );
+        // one tail is rdf:nil
+        assert!(quads.iter().any(|(_, p, o)| p == RDF_REST && o == RDF_NIL));
+
+        assert_eq!(rdf_to_sexpr(&ttl).unwrap(), s);
+    }
+
+    #[test]
+    fn malformed_code_graphs_are_clean_errors_not_panics() {
+        // No root marker.
+        assert!(rdf_to_sexpr("@prefix ex: <http://e/> . ex:a ex:b ex:c .").is_err());
+        // Not even RDF.
+        assert!(rdf_to_sexpr("this is not turtle {{{").is_err());
+        // Root points at a cons node with no rdf:first.
+        let dangling = format!(
+            "@prefix sx: <{SX_NS}> .\n<urn:sexpr:document> sx:root <urn:sexpr:missing> .\n"
+        );
+        assert!(rdf_to_sexpr(&dangling).is_err());
+        // An unknown atom datatype.
+        let bad_dt = format!(
+            "@prefix sx: <{SX_NS}> .\n<urn:sexpr:document> sx:root \"x\"^^<http://ex/weird> .\n"
+        );
+        assert!(rdf_to_sexpr(&bad_dt).is_err());
+    }
+
+    #[test]
+    fn other_triples_in_the_document_are_ignored() {
+        // A code-graph embedded in a larger graph still decodes (unrelated triples are skipped).
+        let s = parse("(a b)").unwrap();
+        let mut ttl = sexpr_to_rdf(&s).unwrap();
+        ttl.push_str("<http://example.org/note> <http://example.org/says> \"hi\" .\n");
+        assert_eq!(rdf_to_sexpr(&ttl).unwrap(), s);
+    }
+
+    #[test]
+    fn the_codec_signatures_are_pure_and_kernel_free() {
+        // `sexpr_to_rdf` / `rdf_to_sexpr` carry no ikigai-core type — kernel-free.
+        let enc: fn(&Sexpr) -> SexprResult<String> = sexpr_to_rdf;
+        let dec: fn(&str) -> SexprResult<Sexpr> = rdf_to_sexpr;
+        let s = parse("(a b)").unwrap();
+        assert_eq!(dec(&enc(&s).unwrap()).unwrap(), s);
+    }
+
+    // ---- the govern payoff: a real SPARQL query OVER encoded code ----------------
+
+    #[test]
+    fn sparql_over_encoded_code_finds_the_head_symbol() {
+        use oxigraph::sparql::{QueryResults, SparqlEvaluator};
+        use oxigraph::store::Store;
+
+        // Encode a program, load its code-graph into a triple store, and ask SPARQL for the
+        // head symbol — code is now a queryable/governable graph, not opaque text.
+        let program = parse("(select (?s ?p ?o) (where (?s ?p ?o)) (limit 10))").unwrap();
+        let ttl = sexpr_to_rdf(&program).unwrap();
+
+        let store = Store::new().unwrap();
+        store
+            .load_from_slice(
+                oxigraph::io::RdfParser::from_format(oxigraph::io::RdfFormat::Turtle),
+                ttl.as_bytes(),
+            )
+            .expect("code-graph loads into oxigraph");
+
+        let query = format!(
+            "PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>\n\
+             PREFIX sx: <{SX_NS}>\n\
+             SELECT ?head WHERE {{ <urn:sexpr:document> sx:root ?top . ?top rdf:first ?head . }}"
+        );
+        let results = SparqlEvaluator::new()
+            .parse_query(&query)
+            .unwrap()
+            .on_store(&store)
+            .execute()
+            .unwrap();
+
+        let mut heads = Vec::new();
+        if let QueryResults::Solutions(solutions) = results {
+            for sol in solutions {
+                let sol = sol.unwrap();
+                if let Some(oxigraph::model::Term::Literal(l)) = sol.get("head") {
+                    heads.push(l.value().to_string());
+                }
+            }
+        }
+        assert_eq!(
+            heads,
+            vec!["select".to_string()],
+            "SPARQL found the head symbol"
+        );
+    }
+}
+
+// ---- slice 3c.2: the to-rdf / from-rdf endpoints, end-to-end through the kernel ----
+
+mod code_graph_endpoints {
+    use super::*;
+    use futures::executor::block_on;
+    use ikigai_core::{ArgRef, Capability, Iri, Kernel, Request, Resolution, Scope, Space};
+    use std::sync::Arc;
+
+    fn source(iri: &str, content: &[u8]) -> String {
+        let kernel = Kernel::new(Arc::new(space()));
+        let request = Request::new(Verb::Source, Iri::parse(iri).unwrap())
+            .with_arg("content", ArgRef::Inline(content.to_vec()));
+        String::from_utf8(
+            block_on(kernel.issue(request, &Capability::root()))
+                .unwrap()
+                .bytes,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn to_rdf_then_from_rdf_round_trips_through_the_kernel() {
+        // sexpr TEXT → urn:sexpr:to-rdf → code-graph Turtle → urn:sexpr:from-rdf → sexpr TEXT.
+        let input = "(select (?s ?p ?o) (where (?s ?p ?o)) (limit 10))";
+        let ttl = source("urn:sexpr:to-rdf", input.as_bytes());
+        assert!(ttl.contains("sx:root"), "code-graph turtle: {ttl}");
+        let back = source("urn:sexpr:from-rdf", ttl.as_bytes());
+        // Canonical text is stable: write(parse(input)) == input for this input.
+        assert_eq!(back, input);
+    }
+
+    #[test]
+    fn to_rdf_describes_itself_with_the_code_graph_profile() {
+        let request = Request::new(Verb::Meta, Iri::parse("urn:sexpr:to-rdf").unwrap());
+        let Resolution::Hit(resolved) = space().resolve(&request, &Scope::empty()) else {
+            panic!("urn:sexpr:to-rdf resolves");
+        };
+        let d = resolved.endpoint.describe();
+        assert!(d.verbs.contains(&Verb::Source) && d.verbs.contains(&Verb::Meta));
+        let t = d.transreption().expect("to-rdf is an ik:Transreptor");
+        assert_eq!(t.from, vec![MEDIA_SEXPR.to_string()]);
+        // The distinguishing target: text/turtle WITH the code-graph profile (not plain
+        // text/turtle) — that is how urn:transrept:auto tells it from urn:rdf:from-sexpr.
+        assert_eq!(t.to, vec![MEDIA_TURTLE_CODE_GRAPH.to_string()]);
+        assert!(t.to[0].contains("profile="));
+        assert_ne!(t.to[0], MEDIA_TURTLE, "must NOT collide with domain Turtle");
+    }
+
+    #[test]
+    fn from_rdf_describes_itself_as_turtle_to_sexpr() {
+        let request = Request::new(Verb::Meta, Iri::parse("urn:sexpr:from-rdf").unwrap());
+        let Resolution::Hit(resolved) = space().resolve(&request, &Scope::empty()) else {
+            panic!("urn:sexpr:from-rdf resolves");
+        };
+        let d = resolved.endpoint.describe();
+        let t = d.transreption().expect("from-rdf is an ik:Transreptor");
+        assert_eq!(t.from, vec![MEDIA_TURTLE.to_string()]);
+        assert_eq!(t.to, vec![MEDIA_SEXPR.to_string()]);
+    }
+
+    #[test]
+    fn a_malformed_document_is_a_clean_endpoint_error() {
+        let kernel = Kernel::new(Arc::new(space()));
+        let req = Request::new(Verb::Source, Iri::parse("urn:sexpr:from-rdf").unwrap())
+            .with_arg("content", ArgRef::Inline(b"not a code-graph".to_vec()));
+        assert!(block_on(kernel.issue(req, &Capability::root())).is_err());
+    }
+}
