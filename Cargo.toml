@@ -1,6 +1,6 @@
 [package]
 name = "ikigai-sexpr"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "Neutral, language-agnostic s-expression foundation for ikigai's portable-code arc: a `Sexpr` datum + reader/printer, pure kernel-free compilers (escaping/validation, never interpolation) turning s-exprs into SPARQL (`urn:sparql:from-sexpr` → application/sparql-query) and into an RDF graph as Turtle (`urn:rdf:from-sexpr` → text/turtle) — queries and graphs from s-exprs with no lisp engine at all."
@@ -19,6 +19,20 @@ categories = ["compilers", "parser-implementations"]
 ikigai-core = "0.1.46"
 async-trait = "0.1"
 
+# Slice 3c.2 lossless code-as-graph: the encoder content-addresses cons cells with a
+# deterministic hash, and the decoder parses the emitted Turtle back to a `Sexpr`. Both
+# live in the PURE (kernel-free) layer, so these are runtime — not dev — deps now.
+# `sha2` (RustCrypto) and Oxigraph's pure-Rust `oxrdf`/`oxrdfio` are all wasm-clean.
+sha2 = "0.10"
+oxrdf = "0.3"
+oxrdfio = "0.2"
+
+# oxrdf/oxrdfio pull getrandom 0.3; its wasm backend must be selected explicitly (paired
+# with the `getrandom_backend` cfg in .cargo/config.toml) so the lib still builds for
+# wasm32 — the crate's browser face. Not used directly.
+[target.'cfg(target_family = "wasm")'.dependencies]
+getrandom = { version = "0.3", features = ["wasm_js"] }
+
 [dev-dependencies]
 futures = "0.3" # block_on for the async endpoint test
 # The real SPARQL engine, so the transreptor's emitted query is proven to RUN
@@ -26,8 +40,9 @@ futures = "0.3" # block_on for the async endpoint test
 # ONLY. `0.1.5` pins ikigai-core `0.1.35` (caret), unifying with ours to one kernel
 # type across the test build.
 ikigai-sparql = "0.1.5"
-# An Oxigraph Turtle parser, so `urn:rdf:from-sexpr`'s emitted Turtle is proven to be
-# VALID RDF — the tests re-parse the output and assert the expected triples. Dev-dep
-# ONLY (the pure compiler emits text; nothing here parses RDF at runtime). Same family
-# and version ikigai-rdf uses.
-oxrdfio = "0.2"
+# `oxrdf`/`oxrdfio` (the Oxigraph Turtle parser the graph tests re-parse output with) are
+# now runtime deps — see [dependencies] — so no dev-only entry is needed. The 3c validity
+# tests and the 3c.2 round-trip/content-addressing tests re-parse output from there.
+# The full Oxigraph engine (the same one `ikigai-sparql` wraps) as a dev-dep ONLY, to run a
+# real SPARQL query over an ENCODED program — proving the 3c.2 code-graph is govern-queryable.
+oxigraph = { version = "0.5", default-features = false }
