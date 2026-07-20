@@ -279,3 +279,290 @@ mod endpoint {
         assert!(!in_arg.required);
     }
 }
+
+// ---- the graph compiler: sexpr → Turtle -------------------------------------
+
+#[test]
+fn compiles_a_basic_graph_to_exact_turtle() {
+    // @prefix line, an IRI-string-literal triple, and an integer literal — one
+    // newline-terminated `S P O .` per triple, in author order.
+    let g = parse(
+        r#"(graph
+             (prefix (ex "http://example.org/"))
+             (ex:alice ex:name "Alice")
+             (ex:alice ex:age 42))"#,
+    )
+    .unwrap();
+    assert_eq!(
+        sexpr_to_turtle(&g).unwrap(),
+        "@prefix ex: <http://example.org/> .\n\
+         ex:alice ex:name \"Alice\" .\n\
+         ex:alice ex:age 42 .\n"
+    );
+}
+
+#[test]
+fn a_predicate_becomes_rdf_type_and_auto_binds_rdf() {
+    // `a` renders as rdf:type; the rdf: prefix is auto-bound (after the author's prefixes)
+    // so the emitted Turtle is self-contained. The subject is a full (iri "…").
+    let g = parse(
+        r#"(graph
+             (prefix (foaf "http://xmlns.com/foaf/0.1/"))
+             ((iri "http://example.org/alice") a foaf:Person))"#,
+    )
+    .unwrap();
+    assert_eq!(
+        sexpr_to_turtle(&g).unwrap(),
+        "@prefix foaf: <http://xmlns.com/foaf/0.1/> .\n\
+         @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .\n\
+         <http://example.org/alice> rdf:type foaf:Person .\n"
+    );
+}
+
+#[test]
+fn an_author_declared_rdf_prefix_is_not_duplicated() {
+    // If the author already binds rdf:, `a` reuses it — no duplicate @prefix line.
+    let g = parse(
+        r#"(graph
+             (prefix (ex "http://example.org/") (rdf "http://www.w3.org/1999/02/22-rdf-syntax-ns#"))
+             (ex:a a ex:Thing))"#,
+    )
+    .unwrap();
+    assert_eq!(
+        sexpr_to_turtle(&g).unwrap(),
+        "@prefix ex: <http://example.org/> .\n\
+         @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .\n\
+         ex:a rdf:type ex:Thing .\n"
+    );
+}
+
+#[test]
+fn compiles_string_int_typed_and_lang_literals() {
+    // The object literal forms: bare string, integer, (lit "v" pfx:dt) typed, (lit "v" @tag).
+    let g = parse(
+        r#"(graph
+             (prefix (ex "http://example.org/") (xsd "http://www.w3.org/2001/XMLSchema#"))
+             (ex:x ex:s "hi")
+             (ex:x ex:n 7)
+             (ex:x ex:d (lit "3.14" xsd:decimal))
+             (ex:x ex:g (lit "Bonjour" @fr)))"#,
+    )
+    .unwrap();
+    assert_eq!(
+        sexpr_to_turtle(&g).unwrap(),
+        "@prefix ex: <http://example.org/> .\n\
+         @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\n\
+         ex:x ex:s \"hi\" .\n\
+         ex:x ex:n 7 .\n\
+         ex:x ex:d \"3.14\"^^xsd:decimal .\n\
+         ex:x ex:g \"Bonjour\"@fr .\n"
+    );
+}
+
+#[test]
+fn an_unknown_graph_head_is_an_error_not_a_panic() {
+    // The wrong top form (a query, or nonsense) is a clean error — this is how the two
+    // text/x-sexpr transreptors disambiguate by head.
+    assert!(sexpr_to_turtle(&parse("(select (?s) (where (?s ?p ?o)))").unwrap()).is_err());
+    assert!(sexpr_to_turtle(&parse("(nonsense)").unwrap()).is_err());
+    assert!(sexpr_to_turtle(&parse("42").unwrap()).is_err());
+}
+
+#[test]
+fn blank_node_forms_are_rejected_with_a_skolemize_message() {
+    // Skolemize: a `_:b` node (subject or object) is rejected, pointing at stable IRIs.
+    let err = sexpr_to_turtle(
+        &parse(r#"(graph (prefix (ex "http://example.org/")) (_:b ex:p ex:o))"#).unwrap(),
+    )
+    .unwrap_err();
+    assert!(err.detail().contains("blank node"), "got: {err}");
+    assert!(sexpr_to_turtle(
+        &parse(r#"(graph (prefix (ex "http://example.org/")) (ex:s ex:p _:o))"#).unwrap()
+    )
+    .is_err());
+}
+
+#[test]
+fn graph_terms_are_escaped_and_validated_not_interpolated() {
+    // An IRI carrying Turtle-breaking syntax is rejected outright (never emitted); a literal
+    // carrying a quote/newline/dot is escaped, not interpolated (proven below by re-parsing).
+    assert!(
+        sexpr_to_turtle(
+            &parse(r#"(graph (ex:s ex:p (iri "http://x> . <urn:evil> a <urn:pwned")))"#).unwrap()
+        )
+        .is_err(),
+        "an IRI with IRIREF-illegal characters must be rejected"
+    );
+    // A bare (unprefixed, non-IRI) subject symbol is rejected — never emitted as a raw token.
+    assert!(sexpr_to_turtle(&parse("(graph (injected ex:p ex:o))").unwrap()).is_err());
+    // A ?variable is not a graph node.
+    assert!(sexpr_to_turtle(&parse("(graph (?s ex:p ex:o))").unwrap()).is_err());
+    // A malformed (lit …) is a clean error, not a panic.
+    assert!(sexpr_to_turtle(&parse(r#"(graph (ex:s ex:p (lit "v")))"#).unwrap()).is_err());
+    assert!(sexpr_to_turtle(&parse(r#"(graph (ex:s ex:p (lit "v" @)))"#).unwrap()).is_err());
+}
+
+#[test]
+fn the_signature_is_pure_and_kernel_free() {
+    // `sexpr_to_turtle` is `&Sexpr -> SexprResult<String>` — no ikigai-core type appears.
+    let f: fn(&Sexpr) -> SexprResult<String> = sexpr_to_turtle;
+    assert!(f(&parse("(graph)").unwrap()).is_ok()); // an empty graph is valid (empty RDF)
+}
+
+// ---- Turtle VALIDITY: the emitted graph re-parses as RDF --------------------
+
+mod validity {
+    use super::*;
+    use oxrdfio::{RdfFormat, RdfParser};
+
+    /// Parse `ttl` as Turtle and render each resulting triple to its canonical N-Triples
+    /// line (`S P O`). Panics if the Turtle is not valid RDF — so calling this at all is
+    /// the validity assertion; the returned lines let a test assert the exact triples.
+    fn triples(ttl: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        for q in RdfParser::from_format(RdfFormat::Turtle).for_slice(ttl.as_bytes()) {
+            let q = q.expect("emitted Turtle must be valid RDF");
+            out.push(format!("{} {} {}", q.subject, q.predicate, q.object));
+        }
+        out
+    }
+
+    #[test]
+    fn basic_graph_reparses_to_the_expected_triples() {
+        let g = parse(
+            r#"(graph
+                 (prefix (ex "http://example.org/"))
+                 (ex:alice ex:name "Alice")
+                 (ex:alice ex:age 42))"#,
+        )
+        .unwrap();
+        let lines = triples(&sexpr_to_turtle(&g).unwrap());
+        assert_eq!(lines.len(), 2);
+        assert!(lines.contains(
+            &r#"<http://example.org/alice> <http://example.org/name> "Alice""#.to_string()
+        ));
+        assert!(lines.iter().any(|l| l.starts_with(
+            "<http://example.org/alice> <http://example.org/age> \"42\"^^<http://www.w3.org/2001/XMLSchema#integer>"
+        )));
+    }
+
+    #[test]
+    fn a_type_triple_reparses_with_the_expanded_rdf_type_iri() {
+        let g = parse(
+            r#"(graph
+                 (prefix (foaf "http://xmlns.com/foaf/0.1/"))
+                 ((iri "http://example.org/alice") a foaf:Person))"#,
+        )
+        .unwrap();
+        let lines = triples(&sexpr_to_turtle(&g).unwrap());
+        assert_eq!(
+            lines,
+            vec!["<http://example.org/alice> \
+                 <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> \
+                 <http://xmlns.com/foaf/0.1/Person>"
+                .to_string()]
+        );
+    }
+
+    #[test]
+    fn an_injection_payload_literal_stays_one_triple() {
+        // A literal carrying `"`, a newline, a `.`, and Turtle statement syntax must NOT
+        // break out: the graph re-parses to exactly ONE triple, the payload trapped inside
+        // the (escaped) literal. This is the escaping-not-interpolation guarantee, proven.
+        let evil = "he said \"boom\" .\n<urn:x> a <urn:y> .";
+        let g = Sexpr::List(vec![
+            Sexpr::Symbol("graph".into()),
+            Sexpr::List(vec![
+                Sexpr::Symbol("prefix".into()),
+                Sexpr::List(vec![
+                    Sexpr::Symbol("ex".into()),
+                    Sexpr::Str("http://example.org/".into()),
+                ]),
+            ]),
+            Sexpr::List(vec![
+                Sexpr::Symbol("ex:s".into()),
+                Sexpr::Symbol("ex:p".into()),
+                Sexpr::Str(evil.into()),
+            ]),
+        ]);
+        let lines = triples(&sexpr_to_turtle(&g).unwrap());
+        assert_eq!(lines.len(), 1, "the payload injected extra triples");
+        let l = &lines[0];
+        assert!(l.starts_with("<http://example.org/s> <http://example.org/p> \""));
+        assert!(l.contains("boom"), "the literal text survived: {l}");
+    }
+}
+
+// ---- the graph transreptor end-to-end, through the kernel -------------------
+
+mod turtle_endpoint {
+    use super::*;
+    use futures::executor::block_on;
+    use ikigai_core::{ArgRef, Capability, Iri, Kernel, Request, Resolution, Scope, Space};
+    use std::sync::Arc;
+
+    /// A kernel over this crate's `space()` — which binds both from-sexpr transreptors.
+    fn source(content: &[u8]) -> String {
+        let kernel = Kernel::new(Arc::new(space()));
+        let request = Request::new(Verb::Source, Iri::parse("urn:rdf:from-sexpr").unwrap())
+            .with_arg("content", ArgRef::Inline(content.to_vec()));
+        String::from_utf8(
+            block_on(kernel.issue(request, &Capability::root()))
+                .unwrap()
+                .bytes,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn from_sexpr_emits_the_expected_turtle() {
+        // sexpr graph TEXT piped in → text/turtle out, end-to-end through the kernel.
+        let ttl =
+            source(b"(graph (prefix (ex \"http://example.org/\")) (ex:alice ex:name \"Alice\"))");
+        assert_eq!(
+            ttl,
+            "@prefix ex: <http://example.org/> .\nex:alice ex:name \"Alice\" .\n"
+        );
+    }
+
+    #[test]
+    fn a_query_form_is_rejected_by_the_graph_transreptor() {
+        // Disambiguation in practice: a `(select …)` piped to urn:rdf:from-sexpr errors on
+        // the wrong head (it wants a `(graph …)`), and vice-versa.
+        let kernel = Kernel::new(Arc::new(space()));
+        let req = Request::new(Verb::Source, Iri::parse("urn:rdf:from-sexpr").unwrap()).with_arg(
+            "content",
+            ArgRef::Inline(b"(select (?s) (where (?s ?p ?o)))".to_vec()),
+        );
+        assert!(block_on(kernel.issue(req, &Capability::root())).is_err());
+    }
+
+    #[test]
+    fn describes_itself_as_a_turtle_transreptor() {
+        let request = Request::new(Verb::Meta, Iri::parse("urn:rdf:from-sexpr").unwrap());
+        let Resolution::Hit(resolved) = space().resolve(&request, &Scope::empty()) else {
+            panic!("urn:rdf:from-sexpr resolves");
+        };
+        let d = resolved.endpoint.describe();
+        assert!(d.verbs.contains(&Verb::Source));
+        assert!(d.verbs.contains(&Verb::Meta));
+
+        // The declared transreption: text/x-sexpr → text/turtle (distinct target type from
+        // the sparql transreptor — that IS the primary disambiguator).
+        let t = d
+            .transreption()
+            .expect("rdf-from-sexpr is an ik:Transreptor");
+        assert_eq!(t.from, vec![MEDIA_SEXPR.to_string()]);
+        assert_eq!(t.to, vec![MEDIA_TURTLE.to_string()]);
+
+        let content = d
+            .inputs
+            .iter()
+            .find(|a| a.name == "content")
+            .expect("content");
+        assert!(content.required);
+        assert_eq!(content.class.as_deref(), Some(XSD_STRING));
+        let in_arg = d.inputs.iter().find(|a| a.name == "in").expect("in");
+        assert!(!in_arg.required);
+    }
+}
