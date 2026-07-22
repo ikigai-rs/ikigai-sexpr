@@ -89,6 +89,27 @@ fn unbalanced_parens_are_errors() {
     );
 }
 
+#[test]
+fn deeply_nested_input_is_a_clean_error_not_a_stack_overflow() {
+    // A pathological run of open parens must be rejected as a parse error, NOT abort the
+    // process by overflowing the reader's recursion. (Before the depth guard this crashed.)
+    let bomb = "(".repeat(100_000);
+    let err = parse(&bomb).expect_err("a 100k-deep input must be rejected, not overflow");
+    match err {
+        SexprError::Parse(msg) => assert!(
+            msg.contains("nests deeper"),
+            "expected a depth-limit parse error, got: {msg}"
+        ),
+        other => panic!("expected a Parse error, got {other:?}"),
+    }
+    // A balanced-but-very-deep input is likewise a clean error, never a panic.
+    let balanced = format!("{}{}", "(".repeat(100_000), ")".repeat(100_000));
+    assert!(
+        matches!(parse(&balanced), Err(SexprError::Parse(_))),
+        "a balanced 100k-deep input must be a clean parse error"
+    );
+}
+
 // ---- the compiler: ikigai-lisp's 9 oracles, retyped over `Sexpr` ------------
 
 #[test]
@@ -625,6 +646,43 @@ mod code_graph {
         for s in &corpus {
             assert_round_trips(s);
         }
+    }
+
+    #[test]
+    fn a_long_flat_list_encodes_and_round_trips_without_overflow() {
+        // The encoder used to recurse once per list ELEMENT (emit_list / list_hash on the
+        // tail), so a flat list of tens of thousands of atoms overflowed the stack during
+        // `sexpr_to_rdf`. The cons chain is now walked iteratively — this must complete and
+        // reconstruct the exact datum.
+        let n = 50_000;
+        let items: Vec<Sexpr> = (0..n).map(|_| Sexpr::Symbol("a".into())).collect();
+        let s = Sexpr::List(items);
+
+        let ttl = sexpr_to_rdf(&s).expect("a long flat list must encode, not overflow");
+        // Each SUFFIX hashes differently (its hash folds in the rest), so a flat list is a
+        // full chain of N distinct cons cells — one `rdf:first` per element. (Sharing only
+        // collapses identical SUB-LISTS, not repeated atoms in a chain.) The point of the
+        // test is that emitting all N completes iteratively rather than overflowing.
+        assert_eq!(
+            ttl.matches(" rdf:first ").count(),
+            n,
+            "a flat N-element list must emit N cons cells"
+        );
+
+        let back = rdf_to_sexpr(&ttl).expect("the long list must decode back");
+        assert_eq!(back, s, "a long flat list must round-trip exactly");
+    }
+
+    #[test]
+    fn a_long_list_of_distinct_atoms_round_trips() {
+        // Distinct elements ⇒ a distinct cons node per suffix (no sharing), exercising the
+        // iterative walk across the full N-length chain rather than the dedup fast path.
+        let n = 20_000;
+        let items: Vec<Sexpr> = (0..n).map(Sexpr::Int).collect();
+        let s = Sexpr::List(items);
+        let ttl = sexpr_to_rdf(&s).expect("a long distinct-atom list must encode");
+        let back = rdf_to_sexpr(&ttl).expect("it must decode back");
+        assert_eq!(back, s, "a long distinct-atom list must round-trip exactly");
     }
 
     #[test]

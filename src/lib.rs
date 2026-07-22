@@ -190,6 +190,18 @@ pub type SexprResult<T> = std::result::Result<T, SexprError>;
 // The reader — recursive-descent s-expression parser.
 // =====================================================================================
 
+/// A guard against unbounded reader recursion. The reader descends per nesting level (two
+/// heavy frames — `read_form` + `read_list`, each holding a `Vec` and formatting scratch),
+/// so a pathological input like `"(".repeat(1_000_000)` would otherwise overflow the stack
+/// and abort the whole process. Beyond this many open lists the reader returns a clean
+/// [`SexprError::Parse`] instead.
+///
+/// Deliberately far below [`MAX_DECODE_DEPTH`] (the decode-side bound over lighter frames):
+/// this cap must hold on a 2 MiB worker-thread stack in a debug build, and it also bounds the
+/// encoder's nesting-axis recursion (`emit_node`/`content_hash`) on the datum the reader
+/// yields. It is still ~20× deeper than any legitimately authored s-expression.
+const MAX_READ_DEPTH: usize = 512;
+
 /// Parse exactly one top-level s-expression from `src`. Whitespace and `;` line comments
 /// are skipped. Errors on an empty input, unbalanced parens, an unterminated string, or
 /// trailing tokens after the first form (use [`parse_all`] for a stream of forms).
@@ -197,7 +209,7 @@ pub fn parse(src: &str) -> SexprResult<Sexpr> {
     let mut r = Reader::new(src);
     r.skip_trivia();
     let form = r
-        .read_form()?
+        .read_form(0)?
         .ok_or_else(|| SexprError::Parse("empty input: expected an s-expression".to_string()))?;
     r.skip_trivia();
     if r.peek().is_some() {
@@ -214,7 +226,7 @@ pub fn parse_all(src: &str) -> SexprResult<Vec<Sexpr>> {
     let mut forms = Vec::new();
     loop {
         r.skip_trivia();
-        match r.read_form()? {
+        match r.read_form(0)? {
             Some(form) => forms.push(form),
             None => break,
         }
@@ -259,11 +271,13 @@ impl Reader {
         }
     }
 
-    /// Read one form (assumes trivia already skipped). `Ok(None)` at end of input.
-    fn read_form(&mut self) -> SexprResult<Option<Sexpr>> {
+    /// Read one form (assumes trivia already skipped). `Ok(None)` at end of input. `depth` is
+    /// the current list-nesting level, threaded so a list bounds its children (see
+    /// [`read_list`](Self::read_list) and [`MAX_READ_DEPTH`]).
+    fn read_form(&mut self, depth: usize) -> SexprResult<Option<Sexpr>> {
         match self.peek() {
             None => Ok(None),
-            Some('(') => self.read_list().map(Some),
+            Some('(') => self.read_list(depth).map(Some),
             Some(')') => Err(SexprError::Parse(
                 "unexpected `)` — unbalanced parens".to_string(),
             )),
@@ -272,8 +286,14 @@ impl Reader {
         }
     }
 
-    /// Read a `( … )` list. Errors if the closing paren is missing.
-    fn read_list(&mut self) -> SexprResult<Sexpr> {
+    /// Read a `( … )` list. Errors if the closing paren is missing, or — guarding the stack
+    /// against a hostile deeply-nested input — if nesting would exceed [`MAX_READ_DEPTH`].
+    fn read_list(&mut self, depth: usize) -> SexprResult<Sexpr> {
+        if depth >= MAX_READ_DEPTH {
+            return Err(SexprError::Parse(format!(
+                "s-expression nests deeper than the reader limit ({MAX_READ_DEPTH})"
+            )));
+        }
         self.pos += 1; // consume '('
         let mut items = Vec::new();
         loop {
@@ -290,7 +310,7 @@ impl Reader {
                 }
                 // peek is Some, so read_form yields Some — but stay total.
                 Some(_) => {
-                    if let Some(form) = self.read_form()? {
+                    if let Some(form) = self.read_form(depth + 1)? {
                         items.push(form);
                     }
                 }
@@ -1019,31 +1039,43 @@ fn emit_node(sexpr: &Sexpr, stmts: &mut Vec<String>, seen: &mut HashSet<String>)
 }
 
 /// Emit the cons chain for a list slice, returning its node term (`<urn:sexpr:…>` or, for the
-/// empty list, `rdf:nil`). Content-addressed: the IRI is the hex of the subtree hash.
+/// empty list, `rdf:nil`). Content-addressed: each suffix's IRI is the hex of its subtree hash.
+///
+/// The cons chain is walked ITERATIVELY along the tail (never recursing per element), so a
+/// long flat list `(a a a …)` cannot overflow the stack. `emit_node` still recurses into each
+/// element's own subtree, but that is bounded by nesting depth (the reader caps it), not list
+/// length. The per-suffix hashes are precomputed bottom-up in one pass ([`suffix_hashes`]),
+/// so the whole walk is linear rather than re-hashing each suffix.
 fn emit_list(items: &[Sexpr], stmts: &mut Vec<String>, seen: &mut HashSet<String>) -> String {
     if items.is_empty() {
         return "rdf:nil".to_string();
     }
-    let iri = node_iri(items);
-    let node = format!("<{iri}>");
-    if seen.insert(iri) {
-        let first = emit_node(&items[0], stmts, seen);
-        let rest = emit_list(&items[1..], stmts, seen);
+    let hashes = suffix_hashes(items);
+    let node_term = |i: usize| format!("<{SEXPR_NODE_PREFIX}{}>", to_hex(&hashes[i]));
+    for i in 0..items.len() {
+        let iri = format!("{SEXPR_NODE_PREFIX}{}", to_hex(&hashes[i]));
+        // A suffix already in `seen` means it — and its whole remaining tail — was emitted
+        // earlier (structural sharing); stop rather than re-walking.
+        if !seen.insert(iri) {
+            break;
+        }
+        let node = node_term(i);
+        let first = emit_node(&items[i], stmts, seen);
+        let rest = if i + 1 == items.len() {
+            "rdf:nil".to_string()
+        } else {
+            node_term(i + 1)
+        };
         stmts.push(format!("{node} rdf:first {first} ."));
         stmts.push(format!("{node} rdf:rest {rest} ."));
     }
-    node
+    node_term(0)
 }
 
 /// A typed Turtle literal `"escaped-value"^^dt` — reusing [`render_string_literal`] so the
 /// lexical form is escaped, never interpolated (a symbol/string can't break out of the graph).
 fn typed_literal(value: &str, datatype_qname: &str) -> String {
     format!("{}^^{datatype_qname}", render_string_literal(value))
-}
-
-/// The content-addressed IRI of a cons cell heading `items`.
-fn node_iri(items: &[Sexpr]) -> String {
-    format!("{SEXPR_NODE_PREFIX}{}", to_hex(&list_hash(items)))
 }
 
 /// The deterministic, domain-separated content hash of a datum's subtree (bottom-up). Equal
@@ -1068,20 +1100,33 @@ fn atom_hash(tag: u8, payload: &[u8]) -> [u8; 32] {
 }
 
 /// Hash of a cons chain starting at `items`: the empty chain is the `nil` marker; otherwise
-/// `H(0x04 ‖ hash(first) ‖ hash(rest))` — so the whole subtree determines the node IRI.
+/// `H(0x04 ‖ hash(first) ‖ hash(rest))` — so the whole subtree determines the node IRI. The
+/// fold over the tail is iterative (see [`suffix_hashes`]), so a long flat list never recurses
+/// per element.
 fn list_hash(items: &[Sexpr]) -> [u8; 32] {
-    let Some((first, rest)) = items.split_first() else {
+    suffix_hashes(items)[0]
+}
+
+/// The content hash of every suffix of `items`, bottom-up: `out[i]` hashes `items[i..]` and
+/// `out[len]` is the `nil` marker. Computed in a single reverse pass — no recursion along the
+/// cons tail — so a long flat list is linear and stack-safe. Each `content_hash` still recurses
+/// into an element's own subtree, but that is bounded by nesting depth, not list length.
+fn suffix_hashes(items: &[Sexpr]) -> Vec<[u8; 32]> {
+    let mut out = vec![[0u8; 32]; items.len() + 1];
+    out[items.len()] = {
         let mut h = Sha256::new();
         h.update([0x00]); // nil marker
-        return h.finalize().into();
+        h.finalize().into()
     };
-    let fh = content_hash(first);
-    let rh = list_hash(rest);
-    let mut h = Sha256::new();
-    h.update([0x04]); // cons marker
-    h.update(fh);
-    h.update(rh);
-    h.finalize().into()
+    for i in (0..items.len()).rev() {
+        let fh = content_hash(&items[i]);
+        let mut h = Sha256::new();
+        h.update([0x04]); // cons marker
+        h.update(fh);
+        h.update(out[i + 1]);
+        out[i] = h.finalize().into();
+    }
+    out
 }
 
 /// Lowercase hex of a byte slice (no dependency, deterministic).
