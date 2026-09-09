@@ -4,7 +4,7 @@
 //! Three layers, in increasing dependency:
 //!
 //! 1. **The datum** — [`Sexpr`], a tiny s-expression AST (`Symbol`/`Str`/`Int`/`List`)
-//!    with a recursive-descent [`parse`] reader and a round-tripping [`write`] printer.
+//!    with a recursive-descent [`parse`] reader and a round-tripping [`write`](fn@write) printer.
 //!    Pure Rust, no dependencies. Every lisp/reader adapts *into* this; the transreptor
 //!    reads s-expr *text* with no lisp engine at all.
 //! 2. **The compilers** — two **pure, kernel-free** total functions `&Sexpr → String`,
