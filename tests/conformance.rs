@@ -203,13 +203,19 @@ fn declared_outputs_are_the_transreption_targets() {
 /// required by-value input from the minimal call and expect a typed refusal; a
 /// call that SUCCEEDS without it means "declared required, actually optional".
 ///
-/// This module declares NO required input, deliberately — `content` (the pipe's
-/// landing name) and `in` (the named alternative) are two spellings of one
-/// document, and `ArgSpec` has no "exactly one of" group. Declaring `content`
-/// required was the state before this arc and it was the #49 finding exactly: an
-/// `in=`-only call succeeds, so "required" was false, and a SHACL pre-flight over
-/// the manifold would have refused a valid call. So the pin runs the other way:
-/// each spelling alone WORKS, and neither is a typed `MissingArgument`.
+/// ⚠ This module declares `content` REQUIRED and `in` optional, and that declaration
+/// is deliberately lenient at invoke: an `in=`-only call SUCCEEDS. By the letter of
+/// #49 that is "declared required, actually optional", so an automated
+/// required-is-required check WILL flag these four — and the flag is correct; the
+/// declaration really is untrue. It is the lesser of two untruths, because
+/// `ArgSpec` has no "exactly one of" group (`ikigai-core-PENDING.md` §29) and the
+/// alternative — both intakes optional, which is what 0.1.3 first shipped — makes
+/// the REPL refuse to pipe into any of them at all (`source_request` fills the one
+/// unnamed REQUIRED by-value input; with none required it errors). See
+/// `src/lib.rs`'s `CONTENT_IS_REQUIRED` and the README.
+///
+/// So the pin runs both ways: each spelling ALONE works (the leniency, stated rather
+/// than discovered), and the empty call is a typed `MissingArgument` naming `content`.
 #[test]
 fn either_intake_alone_works_and_neither_is_a_typed_missing_argument() {
     for (iri, id) in ENDPOINTS {

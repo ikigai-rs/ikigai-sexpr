@@ -1335,8 +1335,7 @@ impl Endpoint for FromSexpr {
             .input(
                 ArgSpec::new("content")
                     .summary(content_summary("the s-expression query TEXT to compile"))
-                    .class(XSD_STRING)
-                    .optional(),
+                    .class(XSD_STRING),
             )
             .input(
                 ArgSpec::new("in")
@@ -1392,8 +1391,7 @@ impl Endpoint for FromSexprTurtle {
             .input(
                 ArgSpec::new("content")
                     .summary(content_summary("the s-expression graph TEXT to compile"))
-                    .class(XSD_STRING)
-                    .optional(),
+                    .class(XSD_STRING),
             )
             .input(
                 ArgSpec::new("in")
@@ -1455,8 +1453,7 @@ impl Endpoint for ToRdf {
             .input(
                 ArgSpec::new("content")
                     .summary(content_summary("the s-expression document TEXT to encode"))
-                    .class(XSD_STRING)
-                    .optional(),
+                    .class(XSD_STRING),
             )
             .input(
                 ArgSpec::new("in")
@@ -1508,8 +1505,7 @@ impl Endpoint for FromRdf {
             .input(
                 ArgSpec::new("content")
                     .summary(content_summary("the code-graph Turtle TEXT to decode"))
-                    .class(XSD_STRING)
-                    .optional(),
+                    .class(XSD_STRING),
             )
             .input(
                 ArgSpec::new("in")
@@ -1559,21 +1555,44 @@ fn invalid(arg: &str, iri: &str, err: &SexprError) -> CoreError {
     }
 }
 
-/// The shared summary of the two alternative text intakes. `ArgSpec` has no spelling for
-/// "exactly one of these two", so both are declared OPTIONAL and the pairing is stated
-/// here: declaring `content` required would make `urn:kernel:validate` reject a perfectly
-/// good `in=` call, and a pre-flight that refuses a valid call is worse than one that lets
-/// the endpoint return a clean `MissingArgument`.
-const ONE_OF_CONTENT_OR_IN: &str = " Exactly one of `content` or `in` is required.";
+/// The pairing of the two alternative text intakes, and the TRADE-OFF that forces one of
+/// them to be declared untruthfully. Stated in the ArgSpec summaries, where the manifold —
+/// and so an agent choosing a call — actually reads it.
+///
+/// `ArgSpec` has no spelling for "exactly one of these two" (`ikigai-core-PENDING.md` §29),
+/// so both available spellings are wrong and the question is only WHICH failure the caller
+/// can recover from:
+///
+/// - **both optional** (what 0.1.3 first shipped): the REPL's `source_request` routes a
+///   piped or positional value into the one *unnamed REQUIRED* input, so with none required
+///   every stage fails with "accepts multiple arguments (content, in); name one with
+///   `key=value`". The endpoint leaves every pipeline, silently, and no test in either repo
+///   sees it — the conformance suite calls the kernel directly and names `content`.
+/// - **`content` required** (what this ships): a pre-flight over the manifold
+///   (`urn:kernel:validate`, an MCP tool schema) refuses an `in=`-only call the endpoint
+///   would have accepted. The caller sees a refusal naming `content` and can pipe instead.
+///
+/// A refused pre-flight is recoverable; an endpoint that has silently left every pipeline
+/// is not. So `content` is REQUIRED and `in` is optional until core gains a one-of group,
+/// at which point both can be true at once.
+const CONTENT_IS_REQUIRED: &str =
+    " Declared REQUIRED so a piped value lands here; pass `in=` instead when you are not \
+     piping.";
+
+/// See [`CONTENT_IS_REQUIRED`]: `in` is the optional named twin, so a pre-flight asks only
+/// for `content` even though the endpoint accepts either.
+const IN_IS_THE_NAMED_TWIN: &str =
+    " The named alternative to `content`, for an unpiped call — optional, so supplying \
+     either one satisfies the endpoint even though a pre-flight asks for `content`.";
 
 /// The `content` intake's summary: `what` names the document this endpoint reads.
 fn content_summary(what: &str) -> String {
-    format!("{what} — usually piped in.{ONE_OF_CONTENT_OR_IN}")
+    format!("{what} — usually piped in.{CONTENT_IS_REQUIRED}")
 }
 
 /// The `in` intake's summary: the named alternative to `content`, same document.
 fn in_summary(what: &str) -> String {
-    format!("{what} (named alternative to `content`).{ONE_OF_CONTENT_OR_IN}")
+    format!("{what}.{IN_IS_THE_NAMED_TWIN}")
 }
 
 #[cfg(test)]
