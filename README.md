@@ -69,6 +69,30 @@ Atoms carry distinguishing datatypes (`^^sx:symbol` / `xsd:string` /
 Once code is a graph you can SPARQL over it, sign it (its content-hash is a stable
 fingerprint), cache it, and ship it — the substrate for portable, verifiable code.
 
+## Conformance
+
+The four endpoints pass [`ikigai-conformance`](https://github.com/ikigai-rs/ikigai-conformance)
+(`tests/conformance.rs`): every input is typed, every id is kebab-case, every
+declared face is the one served, both RDF faces are skolemized and use defined
+terms, and all four are declared **pure** — each is a total function of the
+document text it is handed, so a `.cacheable()` result with no golden thread is
+right rather than a resource nothing can cut.
+
+Two things the endpoints deliberately declare, both pinned by that test:
+
+- **`content` and `in` are both optional.** They are two spellings of one
+  document (the pipe lands in `content`; `in=` is the named alternative), and
+  `ArgSpec` has no "exactly one of" group. Marking `content` required would make a
+  pre-flight over the manifold — `urn:kernel:validate`, an MCP tool schema —
+  refuse a valid `in=` call. Supplying neither is a typed `MissingArgument`; a
+  document that is not this endpoint's shape is a typed `InvalidArgument` naming
+  the input you passed.
+- **`sx:` is this crate's own namespace.** `urn:sexpr:to-rdf` serves
+  `sx:root` / `sx:symbol` under `https://ikigai-rs.dev/ns/sexpr#`, defined and
+  used entirely here — deliberately *not* part of the shared `ikigai-rs.dev/ns`
+  vocabulary while the encoding settles, and nothing under `ik:` is invented for
+  it.
+
 ## Using it from a host
 
 ```rust,ignore

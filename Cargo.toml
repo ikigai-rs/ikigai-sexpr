@@ -1,6 +1,6 @@
 [package]
 name = "ikigai-sexpr"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "Neutral, language-agnostic s-expression foundation for ikigai's portable-code arc: a `Sexpr` datum + reader/printer, pure kernel-free compilers (escaping/validation, never interpolation) turning s-exprs into SPARQL (`urn:sparql:from-sexpr` → application/sparql-query) and into an RDF graph as Turtle (`urn:rdf:from-sexpr` → text/turtle) — queries and graphs from s-exprs with no lisp engine at all."
@@ -35,6 +35,9 @@ getrandom = { version = "0.3", features = ["wasm_js"] }
 
 [dev-dependencies]
 futures = "0.3" # block_on for the async endpoint test
+# The module recipe as one test (`tests/conformance.rs`): walks every endpoint
+# `space()` binds and reports every violation of the recipe at once. Dev-dep ONLY.
+ikigai-conformance = "0.1.0"
 # The real SPARQL engine, so the transreptor's emitted query is proven to RUN
 # end-to-end (`urn:sparql:select` over its always-loaded vocabulary graph). Dev-dep
 # ONLY. `0.1.5` pins ikigai-core `0.1.35` (caret), unifying with ours to one kernel
