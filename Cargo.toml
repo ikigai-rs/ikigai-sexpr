@@ -37,7 +37,7 @@ getrandom = { version = "0.3", features = ["wasm_js"] }
 futures = "0.3" # block_on for the async endpoint test
 # The module recipe as one test (`tests/conformance.rs`): walks every endpoint
 # `space()` binds and reports every violation of the recipe at once. Dev-dep ONLY.
-ikigai-conformance = "0.1.0"
+ikigai-conformance = "0.2.0"
 # The real SPARQL engine, so the transreptor's emitted query is proven to RUN
 # end-to-end (`urn:sparql:select` over its always-loaded vocabulary graph). Dev-dep
 # ONLY. `0.1.5` pins ikigai-core `0.1.35` (caret), unifying with ours to one kernel
