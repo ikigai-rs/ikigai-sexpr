@@ -1304,11 +1304,10 @@ struct FromSexpr;
 #[async_trait]
 impl Endpoint for FromSexpr {
     async fn invoke(&self, inv: &Invocation<'_>) -> CoreResult<Representation> {
-        let src = read_source(inv, "urn:sparql:from-sexpr")?;
-        let sexpr =
-            parse(src).map_err(|e| CoreError::Endpoint(format!("urn:sparql:from-sexpr: {e}")))?;
-        let sparql = sexpr_to_sparql(&sexpr)
-            .map_err(|e| CoreError::Endpoint(format!("urn:sparql:from-sexpr: {e}")))?;
+        let (src, arg) = read_source(inv)?;
+        let sexpr = parse(src).map_err(|e| invalid(arg, "urn:sparql:from-sexpr", &e))?;
+        let sparql =
+            sexpr_to_sparql(&sexpr).map_err(|e| invalid(arg, "urn:sparql:from-sexpr", &e))?;
         Ok(Representation::new(
             ReprType::new(MEDIA_SPARQL_QUERY).with_param("charset", "utf-8"),
             sparql.into_bytes(),
@@ -1335,14 +1334,13 @@ impl Endpoint for FromSexpr {
             .verb(Verb::Meta)
             .input(
                 ArgSpec::new("content")
-                    .summary("the s-expression query TEXT to compile — usually piped in")
-                    .class(XSD_STRING),
+                    .summary(content_summary("the s-expression query TEXT to compile"))
+                    .class(XSD_STRING)
+                    .optional(),
             )
             .input(
                 ArgSpec::new("in")
-                    .summary(
-                        "the s-expression query TEXT (positional/named alternative to content)",
-                    )
+                    .summary(in_summary("the s-expression query TEXT"))
                     .class(XSD_STRING)
                     .optional(),
             )
@@ -1363,11 +1361,9 @@ struct FromSexprTurtle;
 #[async_trait]
 impl Endpoint for FromSexprTurtle {
     async fn invoke(&self, inv: &Invocation<'_>) -> CoreResult<Representation> {
-        let src = read_source(inv, "urn:rdf:from-sexpr")?;
-        let sexpr = parse(src)
-            .map_err(|e| CoreError::Endpoint(format!("urn:rdf:from-sexpr: {}", e.detail())))?;
-        let turtle = sexpr_to_turtle(&sexpr)
-            .map_err(|e| CoreError::Endpoint(format!("urn:rdf:from-sexpr: {}", e.detail())))?;
+        let (src, arg) = read_source(inv)?;
+        let sexpr = parse(src).map_err(|e| invalid(arg, "urn:rdf:from-sexpr", &e))?;
+        let turtle = sexpr_to_turtle(&sexpr).map_err(|e| invalid(arg, "urn:rdf:from-sexpr", &e))?;
         Ok(Representation::new(
             ReprType::new(MEDIA_TURTLE).with_param("charset", "utf-8"),
             turtle.into_bytes(),
@@ -1395,14 +1391,13 @@ impl Endpoint for FromSexprTurtle {
             .verb(Verb::Meta)
             .input(
                 ArgSpec::new("content")
-                    .summary("the s-expression graph TEXT to compile — usually piped in")
-                    .class(XSD_STRING),
+                    .summary(content_summary("the s-expression graph TEXT to compile"))
+                    .class(XSD_STRING)
+                    .optional(),
             )
             .input(
                 ArgSpec::new("in")
-                    .summary(
-                        "the s-expression graph TEXT (positional/named alternative to content)",
-                    )
+                    .summary(in_summary("the s-expression graph TEXT"))
                     .class(XSD_STRING)
                     .optional(),
             )
@@ -1426,11 +1421,9 @@ struct ToRdf;
 #[async_trait]
 impl Endpoint for ToRdf {
     async fn invoke(&self, inv: &Invocation<'_>) -> CoreResult<Representation> {
-        let src = read_source(inv, "urn:sexpr:to-rdf")?;
-        let sexpr = parse(src)
-            .map_err(|e| CoreError::Endpoint(format!("urn:sexpr:to-rdf: {}", e.detail())))?;
-        let turtle = sexpr_to_rdf(&sexpr)
-            .map_err(|e| CoreError::Endpoint(format!("urn:sexpr:to-rdf: {}", e.detail())))?;
+        let (src, arg) = read_source(inv)?;
+        let sexpr = parse(src).map_err(|e| invalid(arg, "urn:sexpr:to-rdf", &e))?;
+        let turtle = sexpr_to_rdf(&sexpr).map_err(|e| invalid(arg, "urn:sexpr:to-rdf", &e))?;
         Ok(Representation::new(
             ReprType::new(MEDIA_TURTLE)
                 .with_param("charset", "utf-8")
@@ -1461,12 +1454,13 @@ impl Endpoint for ToRdf {
             .verb(Verb::Meta)
             .input(
                 ArgSpec::new("content")
-                    .summary("the s-expression document TEXT to encode — usually piped in")
-                    .class(XSD_STRING),
+                    .summary(content_summary("the s-expression document TEXT to encode"))
+                    .class(XSD_STRING)
+                    .optional(),
             )
             .input(
                 ArgSpec::new("in")
-                    .summary("the s-expression document TEXT (named alternative to content)")
+                    .summary(in_summary("the s-expression document TEXT"))
                     .class(XSD_STRING)
                     .optional(),
             )
@@ -1486,9 +1480,8 @@ struct FromRdf;
 #[async_trait]
 impl Endpoint for FromRdf {
     async fn invoke(&self, inv: &Invocation<'_>) -> CoreResult<Representation> {
-        let src = read_source(inv, "urn:sexpr:from-rdf")?;
-        let sexpr = rdf_to_sexpr(src)
-            .map_err(|e| CoreError::Endpoint(format!("urn:sexpr:from-rdf: {}", e.detail())))?;
+        let (src, arg) = read_source(inv)?;
+        let sexpr = rdf_to_sexpr(src).map_err(|e| invalid(arg, "urn:sexpr:from-rdf", &e))?;
         Ok(Representation::new(
             ReprType::new(MEDIA_SEXPR).with_param("charset", "utf-8"),
             write(&sexpr).into_bytes(),
@@ -1514,12 +1507,13 @@ impl Endpoint for FromRdf {
             .verb(Verb::Meta)
             .input(
                 ArgSpec::new("content")
-                    .summary("the code-graph Turtle TEXT to decode — usually piped in")
-                    .class(XSD_STRING),
+                    .summary(content_summary("the code-graph Turtle TEXT to decode"))
+                    .class(XSD_STRING)
+                    .optional(),
             )
             .input(
                 ArgSpec::new("in")
-                    .summary("the code-graph Turtle TEXT (named alternative to content)")
+                    .summary(in_summary("the code-graph Turtle TEXT"))
                     .class(XSD_STRING)
                     .optional(),
             )
@@ -1530,18 +1524,56 @@ impl Endpoint for FromRdf {
 }
 
 /// The s-expr source: piped `content` (the transreptor/pipeline convention — a stage piped
-/// into a from-sexpr transreptor arrives as `content`), falling back to a named `in`. `iri`
-/// names the endpoint for the "no input" error.
-fn read_source<'a>(inv: &'a Invocation<'_>, iri: &str) -> CoreResult<&'a str> {
-    match inv.inline_str("content") {
-        Ok(src) => Ok(src),
-        Err(_) => inv.inline_str("in").map_err(|_| {
-            CoreError::Endpoint(format!(
-                "{iri} needs an s-expr document — pipe one in (e.g. \
-                 `source <sexpr> | {iri}`) or pass `in=…`"
-            ))
-        }),
+/// into a from-sexpr transreptor arrives as `content`), falling back to a named `in`.
+/// Returns the text AND the name of the input it came from, so a malformed document is
+/// reported as an [`InvalidArgument`](ikigai_core::Error::InvalidArgument) naming the
+/// argument the caller actually passed.
+///
+/// Absence of BOTH is a typed [`MissingArgument`](ikigai_core::Error::MissingArgument)
+/// naming `content` (the conventional intake). It used to be an `Endpoint` string carrying
+/// the "pipe one in, or pass `in=…`" hint; that guidance now lives in the two ArgSpec
+/// summaries, where the manifold — and so an agent choosing a call — actually reads it,
+/// rather than only in the text of a failure.
+fn read_source<'a>(inv: &'a Invocation<'_>) -> CoreResult<(&'a str, &'static str)> {
+    for name in ["content", "in"] {
+        match inv.inline_str(name) {
+            Ok(src) => return Ok((src, name)),
+            // Present but unusable (passed by reference, or not UTF-8): that is the
+            // caller's error to see, not a silent fall-through to the alternative.
+            Err(e @ CoreError::InvalidArgument { .. }) => return Err(e),
+            Err(_) => continue,
+        }
     }
+    Err(CoreError::MissingArgument("content".to_string()))
+}
+
+/// A malformed s-expression (or code-graph) document is the ARGUMENT's problem, not the
+/// endpoint's. A typed `InvalidArgument` naming the input the caller passed lets a caller —
+/// an agent retry loop, the wire's typed errors — tell "fix your input" from "the endpoint
+/// broke" without sniffing message text. `iri` prefixes the detail so a pipeline's error
+/// still says which stage rejected it.
+fn invalid(arg: &str, iri: &str, err: &SexprError) -> CoreError {
+    CoreError::InvalidArgument {
+        name: arg.to_string(),
+        detail: format!("{iri}: {}", err.detail()),
+    }
+}
+
+/// The shared summary of the two alternative text intakes. `ArgSpec` has no spelling for
+/// "exactly one of these two", so both are declared OPTIONAL and the pairing is stated
+/// here: declaring `content` required would make `urn:kernel:validate` reject a perfectly
+/// good `in=` call, and a pre-flight that refuses a valid call is worse than one that lets
+/// the endpoint return a clean `MissingArgument`.
+const ONE_OF_CONTENT_OR_IN: &str = " Exactly one of `content` or `in` is required.";
+
+/// The `content` intake's summary: `what` names the document this endpoint reads.
+fn content_summary(what: &str) -> String {
+    format!("{what} — usually piped in.{ONE_OF_CONTENT_OR_IN}")
+}
+
+/// The `in` intake's summary: the named alternative to `content`, same document.
+fn in_summary(what: &str) -> String {
+    format!("{what} (named alternative to `content`).{ONE_OF_CONTENT_OR_IN}")
 }
 
 #[cfg(test)]

@@ -288,13 +288,18 @@ mod endpoint {
         assert_eq!(t.from, vec![MEDIA_SEXPR.to_string()]);
         assert_eq!(t.to, vec![MEDIA_SPARQL_QUERY.to_string()]);
 
-        // `content` is the (required) piped input; `in` an optional alternative.
+        // `content` is the piped input, `in` the named alternative — and BOTH are
+        // declared optional, because ArgSpec cannot say "exactly one of these two"
+        // and declaring `content` required would make a pre-flight (urn:kernel:validate,
+        // the MCP tool schema) reject a perfectly good `in=` call. The pairing is stated
+        // in the summaries; `tests/conformance.rs` pins both directions by invocation.
         let content = d
             .inputs
             .iter()
             .find(|a| a.name == "content")
             .expect("content");
-        assert!(content.required);
+        assert!(!content.required);
+        assert!(content.summary.contains("Exactly one"));
         assert_eq!(content.class.as_deref(), Some(XSD_STRING));
         let in_arg = d.inputs.iter().find(|a| a.name == "in").expect("in");
         assert!(!in_arg.required);
@@ -576,12 +581,13 @@ mod turtle_endpoint {
         assert_eq!(t.from, vec![MEDIA_SEXPR.to_string()]);
         assert_eq!(t.to, vec![MEDIA_TURTLE.to_string()]);
 
+        // Both intakes optional — see the note on the query transreptor's test above.
         let content = d
             .inputs
             .iter()
             .find(|a| a.name == "content")
             .expect("content");
-        assert!(content.required);
+        assert!(!content.required);
         assert_eq!(content.class.as_deref(), Some(XSD_STRING));
         let in_arg = d.inputs.iter().find(|a| a.name == "in").expect("in");
         assert!(!in_arg.required);
