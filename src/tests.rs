@@ -210,7 +210,9 @@ fn compiler_signature_is_kernel_free() {
 mod endpoint {
     use super::*;
     use futures::executor::block_on;
-    use ikigai_core::{ArgRef, Capability, Iri, Kernel, Request, Resolution, Scope, Space};
+    use ikigai_core::{
+        ArgRef, Capability, InputSource, Iri, Kernel, Request, Resolution, Scope, Space,
+    };
     use std::sync::Arc;
 
     /// A kernel binding the real `ikigai-sparql` module (all four query verbs) plus this
@@ -288,21 +290,86 @@ mod endpoint {
         assert_eq!(t.from, vec![MEDIA_SEXPR.to_string()]);
         assert_eq!(t.to, vec![MEDIA_SPARQL_QUERY.to_string()]);
 
-        // `content` is the piped input, `in` the named alternative — and BOTH are
-        // declared optional, because ArgSpec cannot say "exactly one of these two"
-        // and declaring `content` required would make a pre-flight (urn:kernel:validate,
-        // the MCP tool schema) reject a perfectly good `in=` call. The pairing is stated
-        // in the summaries; `tests/conformance.rs` pins both directions by invocation.
+        // `content` is the piped input and is declared REQUIRED; `in` is the optional
+        // named alternative. See `exactly_one_required_by_value_input_per_endpoint` for
+        // why that asymmetry is load-bearing rather than an oversight.
         let content = d
             .inputs
             .iter()
             .find(|a| a.name == "content")
             .expect("content");
-        assert!(!content.required);
-        assert!(content.summary.contains("Exactly one"));
+        assert!(content.required);
+        assert!(content.summary.contains("REQUIRED"));
         assert_eq!(content.class.as_deref(), Some(XSD_STRING));
         let in_arg = d.inputs.iter().find(|a| a.name == "in").expect("in");
         assert!(!in_arg.required);
+        assert!(in_arg.summary.contains("named alternative"));
+    }
+
+    /// ★ The pipeline contract, pinned in THIS repo so no engine is needed to check it.
+    ///
+    /// The REPL's `source_request` (ikigai-cli `crates/ikigai-engine/src/engine.rs`) routes
+    /// a piped or positional value into **the one declared by-value argument left unnamed**;
+    /// when several are unnamed its `many =>` arm keeps only the REQUIRED ones and errors
+    /// unless exactly one remains. So `declared by-value inputs` + `which of them are
+    /// required` IS the whole rule, and an endpoint with **zero** required by-value inputs
+    /// cannot be piped into at all — it fails with "accepts multiple arguments (content,
+    /// in); name one with `key=value`".
+    ///
+    /// 0.1.3 shipped exactly that: #6 made both `content` and `in` `.optional()` to keep a
+    /// SHACL pre-flight from refusing an `in=`-only call, and all four endpoints silently
+    /// left every pipeline. Nothing caught it — `tests/conformance.rs` calls the kernel
+    /// directly and names `content` explicitly, so the engine's routing is never exercised.
+    /// Confirmed by observation against the published engine before this test existed.
+    ///
+    /// This asserts the invariant the engine actually reads. Two or more required by-value
+    /// inputs would be ambiguous; zero would be unpipeable; exactly one is pipeable.
+    #[test]
+    fn exactly_one_required_by_value_input_per_endpoint() {
+        for iri in [
+            "urn:sparql:from-sexpr",
+            "urn:rdf:from-sexpr",
+            "urn:sexpr:to-rdf",
+            "urn:sexpr:from-rdf",
+        ] {
+            let request = Request::new(Verb::Meta, Iri::parse(iri).unwrap());
+            let Resolution::Hit(resolved) = space().resolve(&request, &Scope::empty()) else {
+                panic!("{iri} resolves");
+            };
+            let d = resolved.endpoint.describe();
+
+            // `declared_arguments` counts only `InputSource::Argument` inputs (bindings are
+            // captured from the identifier, never filled by a pipe). These four declare no
+            // bindings, so every input is by-value; assert that rather than assume it.
+            assert!(
+                d.inputs.iter().all(|a| a.source == InputSource::Argument),
+                "{iri}: a binding input would not be fillable by a pipe"
+            );
+
+            let required: Vec<&str> = d
+                .inputs
+                .iter()
+                .filter(|a| a.source == InputSource::Argument && a.required)
+                .map(|a| a.name.as_str())
+                .collect();
+            assert_eq!(
+                required,
+                vec!["content"],
+                "{iri}: the engine fills the ONE required unnamed by-value input, so exactly \
+                 one must be required and it must be `content` (the pipe's landing name). \
+                 Got {required:?} out of {:?}.",
+                d.inputs.iter().map(|a| &a.name).collect::<Vec<_>>()
+            );
+
+            // The other intake stays optional: two required inputs are ambiguous to the
+            // same `many =>` arm, and the call would be unpipeable in the other direction.
+            let in_arg = d
+                .inputs
+                .iter()
+                .find(|a| a.name == "in")
+                .unwrap_or_else(|| panic!("{iri} declares `in`"));
+            assert!(!in_arg.required, "{iri}: `in` must stay optional");
+        }
     }
 }
 
@@ -581,13 +648,15 @@ mod turtle_endpoint {
         assert_eq!(t.from, vec![MEDIA_SEXPR.to_string()]);
         assert_eq!(t.to, vec![MEDIA_TURTLE.to_string()]);
 
-        // Both intakes optional — see the note on the query transreptor's test above.
+        // `content` required, `in` optional — see
+        // `endpoint::exactly_one_required_by_value_input_per_endpoint`, which pins the same
+        // asymmetry across all four and says why the engine needs it.
         let content = d
             .inputs
             .iter()
             .find(|a| a.name == "content")
             .expect("content");
-        assert!(!content.required);
+        assert!(content.required);
         assert_eq!(content.class.as_deref(), Some(XSD_STRING));
         let in_arg = d.inputs.iter().find(|a| a.name == "in").expect("in");
         assert!(!in_arg.required);
