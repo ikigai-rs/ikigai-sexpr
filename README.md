@@ -6,16 +6,16 @@ language-agnostic through transreptors. Every Lisp adapts *into* this datum; eve
 transreptor reads it as text, with no Lisp engine at all.
 
 The core is pure Rust with no kernel dependency — a small `Sexpr` type, a
-reader/printer, and four compilers — wrapped by ikigai endpoints that expose them
+reader/printer, and the compilers — wrapped by ikigai endpoints that expose them
 as first-class `ik:Transreptor`s.
 
-```rust
+```rust,ignore
 pub enum Sexpr { Symbol(String), Str(String), Int(i64), List(Vec<Sexpr>) }
 pub fn parse(&str) -> SexprResult<Sexpr>;          // text  -> datum
 pub fn write(&Sexpr) -> String;                    // datum -> text
 ```
 
-## The four surfaces
+## The six surfaces
 
 | endpoint | transreption | what it does |
 |---|---|---|
@@ -23,9 +23,12 @@ pub fn write(&Sexpr) -> String;                    // datum -> text
 | `urn:rdf:from-sexpr` | `text/x-sexpr → text/turtle` | an **RDF graph** as an s-expr → Turtle (author graphs) |
 | `urn:sexpr:to-rdf` | `text/x-sexpr → text/turtle` (code-graph profile) | **any s-expr → a lossless, content-addressed RDF graph** (put code in the fabric) |
 | `urn:sexpr:from-rdf` | `text/turtle → text/x-sexpr` | the exact inverse of `to-rdf` |
+| `urn:sexpr:arrangement-to-rdf` | `text/x-ikigai-arrangement → text/turtle` | a **kernel's arrangement** as an s-expr → the `ik:` Turtle core builds a space from (lossless) |
+| `urn:sexpr:arrangement-from-rdf` | `text/turtle → text/x-ikigai-arrangement` | the exact inverse: an arrangement's Turtle → its canonical s-expr |
 
-Each is backed by a pure, kernel-free function you can also call directly:
-`sexpr_to_sparql`, `sexpr_to_turtle`, `sexpr_to_rdf`, `rdf_to_sexpr`.
+Each is backed by a pure function you can also call directly: `sexpr_to_sparql`,
+`sexpr_to_turtle`, `sexpr_to_rdf`, `rdf_to_sexpr` (kernel-free), and
+`arrangement_to_turtle`, `turtle_to_arrangement` (through `ikigai-core`'s `Topology`).
 
 ## Queries as s-expressions
 
@@ -69,12 +72,129 @@ Atoms carry distinguishing datatypes (`^^sx:symbol` / `xsd:string` /
 Once code is a graph you can SPARQL over it, sign it (its content-hash is a stable
 fingerprint), cache it, and ship it — the substrate for portable, verifiable code.
 
+## Arrangements as s-expressions
+
+A kernel's arrangement — which endpoints answer which names, in what order, behind
+which fallbacks, mounts, aliases, limiters and levels — is a resource: core renders it
+as `ik:` Turtle (`urn:kernel:topology`) and builds a live space from that Turtle
+(`ikigai_core::build`). This crate writes the same arrangement as an s-expression, so an
+operator can keep it in an `*.arrangement` file (`text/x-ikigai-arrangement`) and the
+ikigai host reads it through a lossless transreption to Turtle (`--arrangement`).
+
+```text
+space := (endpoints [:id "iri"] door…)
+       | (fallback [:id "iri"] space…)
+       | (mount "prefix" [:id "iri"] space)
+       | (alias [:id "iri"] [:max-hops n] rule… space)
+       | (limit "family" [:id "iri"] [:match prefix|exact|template])
+       | (level "iri" [:seals ("prefix"…)] [:namespace "prefix"] space)
+       | (ref "iri")                  ; a named space declared earlier
+door  := (door "pattern" endpoint [:match exact|template] [:confined space])
+rule  := (exact "from" "to") | (prefix "from" "to")
+```
+
+A declaration arranges endpoints the host registered, by name, and never mints one.
+Anonymous spaces are nesting; `:id` names one. A door's match kind is inferred (a `{`
+means a template), and `:match` is written only when the inference is wrong. Whatever
+core cannot build — an opaque peer, a closure rewrite, a chain — is refused with where
+and why, never skipped.
+
+A complete small arrangement, its Turtle, and the space core builds from it:
+
+```rust
+use std::sync::Arc;
+use futures::executor::block_on;
+use ikigai_core::{
+    build, Capability, FnEndpoint, Iri, Kernel, Registry, ReprType, Representation, Request,
+    Verb,
+};
+use ikigai_sexpr::{arrangement_to_topology, arrangement_to_turtle, turtle_to_arrangement};
+
+let arrangement = r#"(fallback
+  (limit "urn:personal:")
+  (endpoints :id "urn:example:public"
+    (door "urn:example:hello" hello)
+    (door "urn:example:greet:{name}" greeter)))
+"#;
+
+let turtle = r#"@prefix ik: <https://ikigai-rs.dev/ns#> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+
+<urn:ikigai:space:_:1> a ik:Fallback ;
+    ik:layers <urn:ikigai:space:_:1:layer:1> .
+<urn:ikigai:space:_:1:layer:1> rdf:first <urn:ikigai:space:_:2> ;
+    rdf:rest <urn:ikigai:space:_:1:layer:2> .
+<urn:ikigai:space:_:1:layer:2> rdf:first <urn:example:public> ;
+    rdf:rest rdf:nil .
+
+<urn:ikigai:space:_:2> a ik:Limit ;
+    ik:family "urn:personal:" ;
+    ik:matchKind "prefix" .
+
+<urn:example:public> a ik:EndpointSpace ;
+    ik:pattern "urn:example:hello" ;
+    ik:pattern "urn:example:greet:{name}" ;
+    ik:doors <urn:example:public:doors:1> .
+<urn:example:public:doors:1> rdf:first <urn:example:public:door:1> ;
+    rdf:rest <urn:example:public:doors:2> .
+<urn:example:public:doors:2> rdf:first <urn:example:public:door:2> ;
+    rdf:rest rdf:nil .
+
+<urn:example:public:door:1> a ik:Door ;
+    ik:pattern "urn:example:hello" ;
+    ik:matchKind "exact" ;
+    ik:endpointName "hello" .
+
+<urn:example:public:door:2> a ik:Door ;
+    ik:pattern "urn:example:greet:{name}" ;
+    ik:matchKind "template" ;
+    ik:endpointName "greeter" .
+"#;
+
+// Both directions, and each reads its own output back before answering.
+assert_eq!(arrangement_to_turtle(arrangement).unwrap(), turtle);
+assert_eq!(turtle_to_arrangement(turtle).unwrap(), arrangement);
+
+// The host registers its endpoints by name; the file arranges them.
+let says = |name: &'static str| {
+    Arc::new(FnEndpoint::new(name, move |_| {
+        Ok(Representation::new(ReprType::new("text/plain"), name.as_bytes().to_vec()))
+    }))
+};
+let mut registry = Registry::new();
+registry.register(says("hello")).unwrap();
+registry.register(says("greeter")).unwrap();
+let kernel = Kernel::new(build(&arrangement_to_topology(arrangement).unwrap(), &registry).unwrap());
+let get = |name: &str| {
+    block_on(kernel.issue(Request::new(Verb::Source, Iri::parse(name).unwrap()), &Capability::root()))
+};
+assert_eq!(get("urn:example:greet:ada").unwrap().bytes, b"greeter");
+assert!(get("urn:personal:diary").is_err()); // the limiter is a hole, not a door
+```
+
+**Lossless, and what that does not cover.** Both transreptors are declared lossless,
+and it is checked: each reads its own output back and refuses to answer if it gets a
+different arrangement. Everything the arrangement means survives — every space, door,
+rule and name, and every order that is meaning. What the Turtle cannot carry is
+presentation: **a comment in the source is the one thing the round trip cannot keep**,
+along with layout and the choice between equivalent spellings (a quoted or bare
+endpoint name, where an option sits, a `:match` the pattern already implies, a
+restated space instead of a `ref`, alias rules written out of table order). Back from
+Turtle, an arrangement prints in the canonical form above.
+
+The media type is deliberately not `text/x-sexpr`: `urn:sexpr:to-rdf` and
+`urn:rdf:from-sexpr` already transrept that to Turtle, so a lossless planner could hand
+the builder the wrong graph. Documents are bounded (`MAX_ARRANGEMENT_DEPTH`,
+`MAX_ARRANGEMENT_NODES`), a Turtle document included, before core reads it. The full
+grammar and every refusal are in the `arrangement` module docs.
+
 ## Conformance
 
-The four endpoints pass [`ikigai-conformance`](https://github.com/ikigai-rs/ikigai-conformance)
+The six endpoints pass [`ikigai-conformance`](https://github.com/ikigai-rs/ikigai-conformance)
 (`tests/conformance.rs`): every input is typed, every id is kebab-case, every
-declared face is the one served, both RDF faces are skolemized and use defined
-terms, and all four are declared **pure** — each is a total function of the
+declared face is the one served, every RDF face is skolemized and uses defined
+terms, and all six are declared **pure** — each is a total function of the
 document text it is handed, so a `.cacheable()` result with no golden thread is
 right rather than a resource nothing can cut.
 
@@ -89,7 +209,7 @@ Two things the endpoints deliberately declare, both pinned by that test:
   the endpoint unpipeable: the REPL routes a piped value into the one *required*
   by-value argument left unnamed, so with none required every stage fails with
   ``accepts multiple arguments (content, in); name one with `key=value` ``. That
-  is what 0.1.3 first did, on all four endpoints, and nothing caught it — the
+  is what 0.1.3 first did, on all four endpoints it had then, and nothing caught it — the
   conformance suite calls the kernel directly and names `content` explicitly, so
   the engine's routing is never exercised.
 
@@ -112,12 +232,12 @@ Two things the endpoints deliberately declare, both pinned by that test:
 ## Using it from a host
 
 ```rust,ignore
-let space = ikigai_sexpr::space(); // binds all four endpoints
+let space = ikigai_sexpr::space(); // binds all six endpoints
 // mount into your kernel alongside the SPARQL/RDF modules
 ```
 
-`Sexpr`, the reader/printer, and the compilers are wasm-clean; the endpoints are
-the only part that touches `ikigai-core`.
+`Sexpr`, the reader/printer, and the compilers are wasm-clean; the endpoints and the
+arrangement surface are the only parts that touch `ikigai-core`.
 
 ## License
 
