@@ -1,6 +1,6 @@
 [package]
 name = "ikigai-sexpr"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "Neutral, language-agnostic s-expression foundation for ikigai's portable-code arc: a `Sexpr` datum + reader/printer, pure kernel-free compilers (escaping/validation, never interpolation) turning s-exprs into SPARQL (`urn:sparql:from-sexpr` → application/sparql-query) and into an RDF graph as Turtle (`urn:rdf:from-sexpr` → text/turtle), and a kernel's arrangement as an s-expression, transrepted losslessly to and from the ik: Turtle core builds a space from (`urn:sexpr:arrangement-to-rdf`, text/x-ikigai-arrangement) — with no lisp engine at all."
