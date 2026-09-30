@@ -57,7 +57,26 @@
 //! must be a stable IRI (skolemize). The emitted Turtle is canonical: `@prefix` lines, then
 //! one `S P O .` statement per triple, each newline-terminated. It always parses as RDF.
 
+//!
+//! ## Arrangements as s-expressions
+//!
+//! A kernel's arrangement — its endpoint spaces, fallbacks, mounts, aliases, limiters and
+//! levels — written as an `*.arrangement` file (`text/x-ikigai-arrangement`) and transrepted
+//! losslessly to and from the `ik:` Turtle core builds a space from. The grammar, what it
+//! refuses, and what "lossless" does and does not keep are in [`arrangement`].
+
 #![forbid(unsafe_code)]
+
+pub mod arrangement;
+pub use arrangement::{
+    arrangement_to_topology, arrangement_to_turtle, topology_to_arrangement, turtle_to_arrangement,
+    ArrangementError, MAX_ARRANGEMENT_DEPTH, MAX_ARRANGEMENT_NODES, MEDIA_ARRANGEMENT,
+};
+
+/// The README's examples, compiled and run as doctests.
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+pub struct ReadmeDoctests;
 
 use async_trait::async_trait;
 use ikigai_core::{
@@ -1283,15 +1302,26 @@ fn decode_list(
 // =====================================================================================
 
 /// Mount the module at its conventional IRIs. A host links this crate and mounts the
-/// returned space to give the kernel two language-agnostic transreptors: the query surface
-/// `urn:sparql:from-sexpr` (`text/x-sexpr → application/sparql-query`) and the
-/// graph-authoring surface `urn:rdf:from-sexpr` (`text/x-sexpr → text/turtle`).
+/// returned space to give the kernel its language-agnostic transreptors: the query surface
+/// `urn:sparql:from-sexpr` (`text/x-sexpr → application/sparql-query`), the
+/// graph-authoring surface `urn:rdf:from-sexpr` (`text/x-sexpr → text/turtle`), the lossless
+/// code-graph pair `urn:sexpr:to-rdf` / `urn:sexpr:from-rdf`, and the lossless arrangement
+/// pair `urn:sexpr:arrangement-to-rdf` / `urn:sexpr:arrangement-from-rdf`
+/// (`text/x-ikigai-arrangement ↔ text/turtle`, see [`arrangement`]).
 pub fn space() -> EndpointSpace {
     EndpointSpace::new()
         .bind(Exact::new("urn:sparql:from-sexpr"), FromSexpr)
         .bind(Exact::new("urn:rdf:from-sexpr"), FromSexprTurtle)
         .bind(Exact::new("urn:sexpr:to-rdf"), ToRdf)
         .bind(Exact::new("urn:sexpr:from-rdf"), FromRdf)
+        .bind(
+            Exact::new("urn:sexpr:arrangement-to-rdf"),
+            arrangement::ArrangementToRdf,
+        )
+        .bind(
+            Exact::new("urn:sexpr:arrangement-from-rdf"),
+            arrangement::ArrangementFromRdf,
+        )
 }
 
 /// The `urn:sparql:from-sexpr` transreptor: read an s-expr query TEXT (piped `content`, or

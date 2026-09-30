@@ -1,12 +1,12 @@
-//! The module recipe as one test: `ikigai-conformance` walks the four endpoints
+//! The module recipe as one test: `ikigai-conformance` walks the six endpoints
 //! [`ikigai_sexpr::space`] binds and reports every violation at once — plus the
 //! by-hand pins for the contracts the suite cannot yet see.
 //!
 //! ## Declarations, and why each
 //!
-//! All four endpoints are `pure` AND `cacheable`. Each is a total function of the
-//! document TEXT it is handed — the reader, the two compilers and the code-graph
-//! codec are the crate's kernel-free layer, and the endpoints resolve nothing:
+//! All six endpoints are `pure` AND `cacheable`. Each is a total function of the
+//! document TEXT it is handed — the reader, the two compilers, the code-graph
+//! codec and the arrangement surface are pure, and the endpoints resolve nothing:
 //! they never touch a file, the network, a clock or the platform, and never issue
 //! a sub-request. So an empty golden-thread set on a `.cacheable()` result is
 //! right, not a resource nothing can cut. (An endpoint that resolved its input by
@@ -35,18 +35,23 @@
 use ikigai_conformance::{Fixture, Suite};
 use ikigai_core::{ArgRef, Capability, Error, Iri, Kernel, Representation, Request, Verb};
 use ikigai_sexpr::{
-    parse, sexpr_to_rdf, space, MEDIA_SEXPR, MEDIA_SPARQL_QUERY, MEDIA_TURTLE,
-    MEDIA_TURTLE_CODE_GRAPH, SX_NS,
+    arrangement_to_turtle, parse, sexpr_to_rdf, space, MEDIA_ARRANGEMENT, MEDIA_SEXPR,
+    MEDIA_SPARQL_QUERY, MEDIA_TURTLE, MEDIA_TURTLE_CODE_GRAPH, SX_NS,
 };
 use std::sync::Arc;
 
 /// Every endpoint `space()` binds: its IRI, its description id, and the document
 /// its fixture feeds it. Order is the binding order.
-const ENDPOINTS: [(&str, &str); 4] = [
+const ENDPOINTS: [(&str, &str); 6] = [
     ("urn:sparql:from-sexpr", "sparql-from-sexpr"),
     ("urn:rdf:from-sexpr", "rdf-from-sexpr"),
     ("urn:sexpr:to-rdf", "sexpr-to-rdf"),
     ("urn:sexpr:from-rdf", "sexpr-from-rdf"),
+    ("urn:sexpr:arrangement-to-rdf", "sexpr-arrangement-to-rdf"),
+    (
+        "urn:sexpr:arrangement-from-rdf",
+        "sexpr-arrangement-from-rdf",
+    ),
 ];
 
 /// A query valid over any graph: the smallest `(select …)` the compiler accepts.
@@ -74,6 +79,25 @@ fn code_graph() -> String {
     sexpr_to_rdf(&parse(DATUM).expect("DATUM parses")).expect("DATUM encodes")
 }
 
+/// A small arrangement — an alias over a named fallback of a limiter and an endpoint
+/// space with an exact door and a template door — so the Turtle face carries every
+/// structure the `ik:` arrangement vocabulary writes: kinds, list cells, doors, rules.
+const ARRANGEMENT: &str = concat!(
+    "(alias\n",
+    "  (exact \"urn:example:short\" \"urn:example:thing\")\n",
+    "  (fallback :id \"urn:example:space\"\n",
+    "    (limit \"urn:example:secret:\")\n",
+    "    (endpoints\n",
+    "      (door \"urn:example:thing\" thing)\n",
+    "      (door \"urn:example:item:{id}\" item))))\n"
+);
+
+/// The Turtle `urn:sexpr:arrangement-from-rdf` reads — produced by the transreptor's own
+/// function rather than pasted, so it is always what core renders today.
+fn arrangement_turtle() -> String {
+    arrangement_to_turtle(ARRANGEMENT).expect("ARRANGEMENT transrepts")
+}
+
 /// The document each action's fixture feeds, by description id.
 fn fixture_input(id: &str) -> String {
     match id {
@@ -81,6 +105,8 @@ fn fixture_input(id: &str) -> String {
         "rdf-from-sexpr" => GRAPH.to_string(),
         "sexpr-to-rdf" => DATUM.to_string(),
         "sexpr-from-rdf" => code_graph(),
+        "sexpr-arrangement-to-rdf" => ARRANGEMENT.to_string(),
+        "sexpr-arrangement-from-rdf" => arrangement_turtle(),
         other => panic!("no fixture for `{other}`"),
     }
 }
@@ -155,6 +181,12 @@ fn every_action_serves_the_face_it_declares_and_declares_the_face_it_serves() {
         ("urn:rdf:from-sexpr", MEDIA_TURTLE, GRAPH),
         ("urn:sexpr:to-rdf", MEDIA_TURTLE_CODE_GRAPH, DATUM),
         ("urn:sexpr:from-rdf", MEDIA_SEXPR, &code_graph()),
+        ("urn:sexpr:arrangement-to-rdf", MEDIA_TURTLE, ARRANGEMENT),
+        (
+            "urn:sexpr:arrangement-from-rdf",
+            MEDIA_ARRANGEMENT,
+            &arrangement_turtle(),
+        ),
     ];
     let kernel = kernel();
     for (iri, face, input) in expected {
@@ -206,7 +238,7 @@ fn declared_outputs_are_the_transreption_targets() {
 /// ⚠ This module declares `content` REQUIRED and `in` optional, and that declaration
 /// is deliberately lenient at invoke: an `in=`-only call SUCCEEDS. By the letter of
 /// #49 that is "declared required, actually optional", so an automated
-/// required-is-required check WILL flag these four — and the flag is correct; the
+/// required-is-required check WILL flag these six — and the flag is correct; the
 /// declaration really is untrue. It is the lesser of two untruths, because
 /// `ArgSpec` has no "exactly one of" group (`ikigai-core-PENDING.md` §29) and the
 /// alternative — both intakes optional, which is what 0.1.3 first shipped — makes
@@ -245,14 +277,15 @@ fn either_intake_alone_works_and_neither_is_a_typed_missing_argument() {
 /// document must come back as a typed `InvalidArgument` NAMING the input the
 /// caller passed, never as a panic, a success, or an untyped `Endpoint` string
 /// that an agent would have to sniff to know it was its own input at fault.
-/// `(` is unreadable for all four (an unbalanced list, and not Turtle either), so
+/// `(` is unreadable for all six (an unbalanced list, and not Turtle either), so
 /// it is the one malformed document every endpoint must reject. `x` — the suite's
-/// own minimal scalar, and a one-symbol datum — is rejected by three of them but
+/// own minimal scalar, and a one-symbol datum — is rejected by five of them but
 /// is a PERFECTLY VALID input to `urn:sexpr:to-rdf`, which is total over every
 /// datum the reader produces: its only argument error is a reader error. That
 /// asymmetry is the encoder's whole point, so it is pinned rather than papered over.
 #[test]
 fn a_well_typed_but_malformed_document_is_an_invalid_argument_naming_the_input() {
+    let code_graph = code_graph();
     let unreadable: Vec<(&str, &str)> = ENDPOINTS.iter().map(|(iri, _)| (*iri, "(")).collect();
     let not_this_endpoints_shape = vec![
         // A bare symbol: a valid datum, not a `(select …)`.
@@ -261,6 +294,14 @@ fn a_well_typed_but_malformed_document_is_an_invalid_argument_naming_the_input()
         ("urn:rdf:from-sexpr", "x"),
         // Not Turtle at all.
         ("urn:sexpr:from-rdf", "x"),
+        // A bare symbol: a valid datum, not a space form.
+        ("urn:sexpr:arrangement-to-rdf", "x"),
+        // Not Turtle at all.
+        ("urn:sexpr:arrangement-from-rdf", "x"),
+        // A valid s-expression of another surface: a graph, not an arrangement.
+        ("urn:sexpr:arrangement-to-rdf", "(graph)"),
+        // Valid Turtle of another surface: a code-graph, not an arrangement.
+        ("urn:sexpr:arrangement-from-rdf", &code_graph),
     ];
     for (iri, bad) in unreadable.into_iter().chain(not_this_endpoints_shape) {
         for name in ["content", "in"] {
@@ -279,7 +320,7 @@ fn a_well_typed_but_malformed_document_is_an_invalid_argument_naming_the_input()
         }
     }
     // The converse, so the list above cannot rot into "everything is rejected":
-    // the lossless encoder ACCEPTS the bare symbol the other three refuse.
+    // the lossless encoder ACCEPTS the bare symbol the other five refuse.
     resolve(&[("content", "x")], "urn:sexpr:to-rdf")
         .expect("urn:sexpr:to-rdf encodes any datum the reader produces, a lone symbol included");
 }
