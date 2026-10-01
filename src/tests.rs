@@ -3,6 +3,9 @@
 //! through the real `ikigai-sparql` engine.
 
 use super::*;
+use crate::codegraph::*;
+use crate::endpoints::*;
+use ikigai_core::Verb;
 
 // ---- the reader / printer ---------------------------------------------------
 

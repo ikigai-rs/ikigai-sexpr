@@ -10,3 +10,32 @@ jobs:
     uses: ikigai-rs/.github/.github/workflows/rust.yml@main
     with:
       wasm-lib: true
+
+  # The arrangement surface alone — `default-features = false`, what a page in a browser
+  # builds to mount `arrangement_space()` (ledger #649). The shared gates run the default
+  # features only, so without this job nothing would check that the minimal build compiles,
+  # lints and passes, nor that it stays minimal.
+  minimal:
+    name: arrangement only (no default features)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --no-default-features --all-targets -- -D warnings
+      - run: cargo clippy --no-default-features --lib --target wasm32-unknown-unknown -- -D warnings
+      - run: cargo test --no-default-features
+      # The point of the feature: none of the code-graph codec's dependencies are compiled.
+      # A positive check (the tree must print, and must not name them), so a failing
+      # `cargo tree` cannot read as "absent".
+      - name: the minimal build compiles neither sha2 nor oxrdfio
+        run: |
+          tree=$(cargo tree --no-default-features -e normal --prefix none)
+          grep -q '^ikigai-sexpr ' <<<"$tree"
+          if grep -E '^(sha2|oxrdfio|oxrdfxml|oxjsonld) ' <<<"$tree"; then
+            echo "::error::the --no-default-features graph compiles the code-graph codec's dependencies"
+            exit 1
+          fi

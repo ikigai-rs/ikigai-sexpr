@@ -8,24 +8,29 @@
 //!   what core renders for K;
 //! - the space core builds from the s-expression answers every sampled name as K does.
 //!
-//! Then the refusals — each naming what and where — the bounds, and the host's path: a
-//! lossless plan from `text/x-ikigai-arrangement` to `text/turtle` that picks this crate's
-//! transreptor and not the `text/x-sexpr` ones.
+//! Then the refusals — each naming what and where — the bounds, which are core's and are
+//! held to core's own refusal on every shape, and the host's path: a lossless plan from
+//! `text/x-ikigai-arrangement` to `text/turtle` that picks this crate's transreptor, over
+//! `arrangement_space()` alone and (with the `full` feature) beside every other surface.
 
 use std::sync::Arc;
 
 use futures::executor::block_on;
 use ikigai_core::{
     build, select_transreptor, Alias, AliasTable, ArgRef, AsyncFnEndpoint, Capability, Confine,
-    Door, Endpoint, EndpointSpace, Exact, Fallback, FnEndpoint, Iri, Kernel, Level, Limit,
-    MatchKind, Mount, Registry, ReprType, Representation, Request, Space, SpaceKind, Topology,
-    UriTemplate, Verb,
+    DeclarationBound, DeclarationError, Door, Endpoint, EndpointSpace, Exact, Fallback, FnEndpoint,
+    Iri, Kernel, Level, Limit, MatchKind, Mount, Registry, ReprType, Representation, Request,
+    RuleKind, Space, SpaceKind, Topology, TopologyRule, UriTemplate, Verb, DEFAULT_MAX_HOPS,
+    MAX_DECLARATION_DEPTH, MAX_DECLARATION_NODES, MAX_DECLARATION_TEXT,
 };
+#[cfg(feature = "full")]
+use ikigai_core::{select_transreptor_with, TransreptionPolicy};
 use ikigai_sexpr::{
-    arrangement_to_topology, arrangement_to_turtle, space, topology_to_arrangement,
-    turtle_to_arrangement, ArrangementError, MAX_ARRANGEMENT_DEPTH, MAX_ARRANGEMENT_NODES,
-    MEDIA_ARRANGEMENT, MEDIA_SEXPR, MEDIA_TURTLE,
+    arrangement_space, arrangement_to_topology, arrangement_to_turtle, topology_to_arrangement,
+    turtle_to_arrangement, ArrangementError, MEDIA_ARRANGEMENT, MEDIA_TURTLE,
 };
+#[cfg(feature = "full")]
+use ikigai_sexpr::{space, MEDIA_SEXPR};
 
 fn iri(s: &str) -> Iri {
     Iri::parse(s).unwrap()
@@ -277,7 +282,7 @@ fn every_kind_goes_around_every_loop() {
 const T: &str = "urn:iki:tutorial:ttt:";
 
 /// The shape `crates/tic-tac-toe` in ikigai-tutorial composes (`space_with_store`): every
-/// door bound through `UriTemplate::parse`, so the seven without a variable are templates
+/// door bound through `UriTemplate::parse`, so the eight without a variable are templates
 /// too; the eight lines of the board as exact aliases onto `cells:{list}`; over a fallback of
 /// the composites and the store.
 fn tic_tac_toe() -> (Arc<dyn Space>, Registry) {
@@ -808,8 +813,16 @@ fn the_printer_refuses_what_the_grammar_cannot_say() {
 
 #[test]
 fn turtle_that_is_not_an_arrangement_is_refused() {
+    // Core reads the document, so the refusal is core's, kept typed.
     let error = turtle_to_arrangement("this is not turtle").unwrap_err();
-    assert!(error.reason.starts_with("not Turtle"), "{error}");
+    assert!(error.reason.contains("not Turtle"), "{error}");
+    assert!(
+        matches!(
+            error.declaration.as_deref(),
+            Some(DeclarationError::Malformed { .. })
+        ),
+        "{error}"
+    );
 
     // A chain is what `urn:kernel:topology` answers, and not a space: core reads it, the
     // grammar cannot say it.
@@ -837,9 +850,40 @@ fn turtle_that_is_not_an_arrangement_is_refused() {
 }
 
 // ---- bounds ----------------------------------------------------------------------------
+//
+// An arrangement is held to core's declaration bounds, in core's units, on both paths: a
+// Turtle document is core's own to refuse, and the s-expression reader counts as core counts
+// and refuses with core's error. Every refusal below is checked against what core itself says
+// about the same tree, through `build` (which runs core's own measure).
 
-/// A chain `depth` spaces and doors deep that cycles through every kind that encloses —
-/// fallback, mount, alias, level, and a door confined to a corridor — ending in a limiter.
+/// The typed refusal an error carries: core's.
+fn core_refusal(error: &ArrangementError) -> &DeclarationError {
+    error
+        .declaration
+        .as_deref()
+        .unwrap_or_else(|| panic!("not core's refusal: {error}"))
+}
+
+fn too_large(bound: DeclarationBound, node: &str) -> DeclarationError {
+    DeclarationError::TooLarge {
+        bound,
+        limit: bound.limit(),
+        node: node.into(),
+    }
+}
+
+/// What core's `build` refuses `tree` for, before it looks for a single endpoint.
+fn core_refuses(tree: &Topology) -> DeclarationError {
+    match build(tree, &Registry::new()) {
+        Err(e @ DeclarationError::TooLarge { .. }) => e,
+        Err(other) => panic!("core passed the bounds and refused for another reason: {other}"),
+        Ok(_) => panic!("core built it"),
+    }
+}
+
+/// A chain `depth` spaces deep — core's units: a door is not a level, its confined corridor
+/// is — that cycles through every kind that encloses: fallback, mount, alias, level, and a
+/// door confined to a corridor. It ends in a limiter at exactly `depth`.
 fn every_kind_nested(depth: usize) -> String {
     let (mut open, mut close) = (String::new(), String::new());
     let (mut d, mut i) = (1, 0);
@@ -850,10 +894,10 @@ fn every_kind_nested(depth: usize) -> String {
             1 => (format!("(mount \"urn:m{i}:\" "), ")", 1),
             2 => ("(alias (exact \"urn:a\" \"urn:b\") ".to_string(), ")", 1),
             3 => (format!("(level \"urn:l:{i}\" "), ")", 1),
-            _ if d + 3 <= depth => (
+            _ if d + 2 <= depth => (
                 format!("(endpoints (door \"urn:d{i}\" x :confined (fallback :id \"urn:c:{i}\" "),
                 ")))",
-                3,
+                2,
             ),
             _ => ("(fallback ".to_string(), ")", 1),
         };
@@ -873,12 +917,18 @@ fn nested_fallbacks(depth: usize) -> String {
 }
 
 #[test]
-fn nesting_is_bounded_in_both_directions_and_the_bound_itself_round_trips() {
-    // Past the bound: refused by the arrangement bound, and far past it by the reader's.
-    let error = arrangement_to_topology(&nested_fallbacks(MAX_ARRANGEMENT_DEPTH + 1)).unwrap_err();
-    assert!(error.reason.contains("nests deeper than"), "{error}");
+fn nesting_is_bounded_as_core_bounds_it_and_the_bound_itself_round_trips() {
+    // Past the bound: core's typed refusal, naming the node core numbers 49.
+    let error = arrangement_to_topology(&nested_fallbacks(MAX_DECLARATION_DEPTH + 1)).unwrap_err();
+    assert_eq!(
+        core_refusal(&error),
+        &too_large(DeclarationBound::Depth, "urn:ikigai:space:_:49"),
+        "{error}"
+    );
+    // Far past it, the crate's s-expression reader stops first.
     let error = arrangement_to_topology(&nested_fallbacks(100_000)).unwrap_err();
     assert!(error.reason.contains("reader limit"), "{error}");
+    assert_eq!(error.declaration, None);
 
     // AT the bound, every walk — this crate's and core's to_turtle, from_turtle and build —
     // fits a 2 MiB worker stack, in the debug build CI tests.
@@ -888,8 +938,8 @@ fn nesting_is_bounded_in_both_directions_and_the_bound_itself_round_trips() {
             let x = says("x");
             let registry = registry(&[&x]);
             for text in [
-                nested_fallbacks(MAX_ARRANGEMENT_DEPTH),
-                every_kind_nested(MAX_ARRANGEMENT_DEPTH),
+                nested_fallbacks(MAX_DECLARATION_DEPTH),
+                every_kind_nested(MAX_DECLARATION_DEPTH),
             ] {
                 let tree = arrangement_to_topology(&text).unwrap();
                 let turtle = arrangement_to_turtle(&text).unwrap();
@@ -900,11 +950,31 @@ fn nesting_is_bounded_in_both_directions_and_the_bound_itself_round_trips() {
         })
         .unwrap();
     worker.join().expect("the bound fits a 2 MiB stack");
-    let error = arrangement_to_topology(&every_kind_nested(MAX_ARRANGEMENT_DEPTH + 1)).unwrap_err();
-    assert!(error.reason.contains("nests deeper than"), "{error}");
 
-    // A Turtle document nested far past the bound is refused BEFORE core's recursive
-    // reader sees it.
+    // One level past it, through every kind: the reader refuses exactly as core does — the
+    // same bound, the same node — whether the tree arrives as s-expression or as a value.
+    for at_bound in [
+        nested_fallbacks(MAX_DECLARATION_DEPTH),
+        every_kind_nested(MAX_DECLARATION_DEPTH),
+    ] {
+        let tree = arrangement_to_topology(&at_bound).unwrap();
+        let deeper = Topology::new(SpaceKind::Fallback).child(tree);
+        let expected = core_refuses(&deeper);
+        let error = arrangement_to_topology(&format!("(fallback {at_bound})")).unwrap_err();
+        assert_eq!(core_refusal(&error), &expected, "{error}");
+        let error = topology_to_arrangement(&deeper).unwrap_err();
+        assert_eq!(core_refusal(&error), &expected, "{error}");
+        assert!(matches!(
+            expected,
+            DeclarationError::TooLarge {
+                bound: DeclarationBound::Depth,
+                ..
+            }
+        ));
+    }
+
+    // A Turtle document nested far past the bound is core's to refuse, before its recursive
+    // reader descends past the bound — and core's typed refusal reaches the caller.
     let mut turtle = String::from("@prefix ik: <https://ikigai-rs.dev/ns#> .\n");
     let n = 200_000;
     for i in 1..n {
@@ -917,36 +987,68 @@ fn nesting_is_bounded_in_both_directions_and_the_bound_itself_round_trips() {
         "<urn:m:{n}> a ik:Limit ; ik:family \"urn:x:\" ; ik:matchKind \"prefix\" .\n"
     ));
     let error = turtle_to_arrangement(&turtle).unwrap_err();
-    assert!(error.reason.contains("nests deeper than"), "{error}");
+    assert_eq!(
+        core_refusal(&error),
+        &too_large(DeclarationBound::Depth, "urn:m:49"),
+        "{error}"
+    );
+    assert_eq!(error.at, "<urn:m:49>");
+}
+
+/// The billion-laughs shape: each named space places the previous one twice, so `k` lines
+/// stand for 2^k spaces.
+fn doubling(k: usize, family: &str) -> String {
+    let mut text = format!("(fallback\n  (limit \"{family}\" :id \"urn:f:0\")\n");
+    for j in 1..=k {
+        let p = j - 1;
+        text.push_str(&format!(
+            "  (fallback :id \"urn:f:{j}\" (ref \"urn:f:{p}\") (ref \"urn:f:{p}\"))\n"
+        ));
+    }
+    text.push(')');
+    text
+}
+
+/// The same tree as [`doubling`], built as a value — 2^k spaces, so only for a small `k`.
+fn doubled(k: usize, family: &str) -> Topology {
+    let mut named = Topology::new(SpaceKind::Limit {
+        family: family.into(),
+        kind: MatchKind::Prefix,
+    })
+    .with_id(Some(iri("urn:f:0")));
+    let mut tree = Topology::new(SpaceKind::Fallback).child(named.clone());
+    for j in 1..=k {
+        named = Topology::new(SpaceKind::Fallback)
+            .with_id(Some(iri(&format!("urn:f:{j}"))))
+            .child(named.clone())
+            .child(named);
+        tree = tree.child(named.clone());
+    }
+    tree
 }
 
 #[test]
 fn a_ref_cannot_multiply_the_arrangement_past_the_bound() {
-    // Each named space places the previous one twice: 2^k spaces from k lines.
-    let mut text = String::from("(fallback\n  (limit \"urn:x:\" :id \"urn:f:0\")\n");
-    for k in 1..=40 {
-        text.push_str(&format!(
-            "  (fallback :id \"urn:f:{k}\" (ref \"urn:f:{p}\") (ref \"urn:f:{p}\"))\n",
-            p = k - 1
-        ));
-    }
-    text.push(')');
-    let error = arrangement_to_topology(&text).unwrap_err();
-    assert!(
-        error
-            .reason
-            .contains(&format!("more than {MAX_ARRANGEMENT_NODES}")),
+    // 2^40 spaces from forty lines: refused at the first `ref` that passes 65,536 nodes,
+    // named as the space it places again — exactly as core refuses the same tree (built
+    // here as a value only as far as it needs to be to pass the bound).
+    let error = arrangement_to_topology(&doubling(40, "urn:x:")).unwrap_err();
+    assert_eq!(
+        core_refusal(&error),
+        &too_large(DeclarationBound::Nodes, "urn:f:14"),
         "{error}"
     );
+    assert_eq!(core_refusal(&error), &core_refuses(&doubled(16, "urn:x:")));
 
     // The same shape as Turtle is small — core renders a named node once — and core's reader
-    // would expand it at every reference. It is measured first, and refused.
+    // would expand it at every reference. Core counts as it reads, and refuses: twenty
+    // doublings, so the chain stays inside the depth bound and the node bound is the one met.
     let mut turtle = String::from(
         "@prefix ik: <https://ikigai-rs.dev/ns#> .\n\
          @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .\n\
          <urn:f:0> a ik:Limit ; ik:family \"urn:x:\" ; ik:matchKind \"prefix\" .\n",
     );
-    for k in 1..=64 {
+    for k in 1..=20 {
         let p = k - 1;
         turtle.push_str(&format!(
             "<urn:f:{k}> a ik:Fallback ; ik:layers <urn:f:{k}:layer:1> .\n\
@@ -956,20 +1058,132 @@ fn a_ref_cannot_multiply_the_arrangement_past_the_bound() {
     }
     let error = turtle_to_arrangement(&turtle).unwrap_err();
     assert!(
-        error
-            .reason
-            .contains(&format!("more than {MAX_ARRANGEMENT_NODES}")),
+        matches!(
+            core_refusal(&error),
+            DeclarationError::TooLarge {
+                bound: DeclarationBound::Nodes,
+                limit: MAX_DECLARATION_NODES,
+                ..
+            }
+        ),
         "{error}"
     );
+}
+
+#[test]
+fn text_is_bounded_too_counted_at_every_place_it_is_used() {
+    // One 1 MiB family, placed 2^4 times: past MAX_DECLARATION_TEXT with a few dozen nodes.
+    let family = format!("urn:x:{}", "y".repeat(1024 * 1024));
+    let error = arrangement_to_topology(&doubling(4, &family)).unwrap_err();
+    assert_eq!(
+        core_refusal(&error),
+        &core_refuses(&doubled(4, &family)),
+        "{error}"
+    );
+    assert!(matches!(
+        core_refusal(&error),
+        DeclarationError::TooLarge {
+            bound: DeclarationBound::Text,
+            ..
+        }
+    ));
+}
+
+/// Shapes that grow by one unit of a bound at a time, each with the largest size core still
+/// accepts: the reader accepts that one and refuses the next exactly as core refuses it. This
+/// is what holds the reader's count — doors and alias rules as nodes, a mount's prefix and a
+/// limiter's family as text — to core's.
+#[test]
+fn the_reader_counts_exactly_as_core_counts() {
+    let x = says("x");
+    let registry = registry(&[&x]);
+
+    // Doors: an endpoint space is one node and each door another.
+    let doors = |n: usize| {
+        let doors: Vec<Door> = (0..n)
+            .map(|i| Door::new(format!("urn:d:{i}"), MatchKind::Exact, "x"))
+            .collect();
+        let text = doors
+            .iter()
+            .map(|d| format!("(door \"{}\" x)", d.pattern))
+            .collect::<Vec<_>>()
+            .join(" ");
+        (
+            format!("(endpoints {text})"),
+            Topology::new(SpaceKind::EndpointSpace { doors }),
+        )
+    };
+    // Rules: an alias is one node, each rule another, and the space it encloses one more.
+    let rules = |n: usize| {
+        let rules: Vec<TopologyRule> = (0..n)
+            .map(|i| TopologyRule::new(RuleKind::Exact, format!("urn:a:{i:06}"), "urn:b"))
+            .collect();
+        let text = rules
+            .iter()
+            .map(|r| format!("(exact \"{}\" \"urn:b\")", r.from))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let limit = Topology::new(SpaceKind::Limit {
+            family: "urn:x:".into(),
+            kind: MatchKind::Prefix,
+        });
+        (
+            format!("(alias {text} (limit \"urn:x:\"))"),
+            Topology::new(SpaceKind::Alias {
+                rules,
+                max_hops: DEFAULT_MAX_HOPS,
+            })
+            .child(limit),
+        )
+    };
+    // Text: a mount's prefix and the limiter it encloses, `n` bytes between them.
+    let text = |n: usize| {
+        let prefix = format!("urn:{}", "p".repeat(n / 2 - 4));
+        let family = format!("urn:{}", "f".repeat(n - prefix.len() - 4));
+        (
+            format!("(mount \"{prefix}\" (limit \"{family}\"))"),
+            Topology::new(SpaceKind::Mount { prefix }).child(Topology::new(SpaceKind::Limit {
+                family,
+                kind: MatchKind::Prefix,
+            })),
+        )
+    };
+
+    type Shape<'a> = &'a dyn Fn(usize) -> (String, Topology);
+    let shapes: [(&str, Shape, usize); 3] = [
+        ("doors", &doors, MAX_DECLARATION_NODES - 1),
+        ("rules", &rules, MAX_DECLARATION_NODES - 2),
+        ("text", &text, MAX_DECLARATION_TEXT),
+    ];
+    for (what, shape, largest) in shapes {
+        let (text, tree) = shape(largest);
+        assert_eq!(arrangement_to_topology(&text).unwrap(), tree, "{what}");
+        if what == "doors" {
+            build(&tree, &registry).unwrap();
+        }
+        let (text, tree) = shape(largest + 1);
+        let error = arrangement_to_topology(&text).unwrap_err();
+        assert_eq!(
+            core_refusal(&error),
+            &core_refuses(&tree),
+            "{what}: {error}"
+        );
+        let error = topology_to_arrangement(&tree).unwrap_err();
+        assert_eq!(
+            core_refusal(&error),
+            &core_refuses(&tree),
+            "{what}: {error}"
+        );
+    }
 }
 
 // ---- the host's path -------------------------------------------------------------------
 
 /// What the ikigai host does with `--arrangement` (ikigai-cli PR #371): read the file
 /// through a kernel, plan a LOSSLESS route to `text/turtle`, issue each step with the value
-/// as `content` and the target as `as`, then parse and build.
-#[test]
-fn a_lossless_plan_takes_an_arrangement_file_to_a_built_space() {
+/// as `content` and the target as `as`, then parse and build. Run over `surface` mounted
+/// beside the file.
+fn host_path(surface: Arc<dyn Space>) -> Arc<dyn Space> {
     let file: Arc<dyn Endpoint> = Arc::new(FnEndpoint::new("the-file", |_| {
         Ok(Representation::new(
             ReprType::new(MEDIA_ARRANGEMENT),
@@ -978,7 +1192,7 @@ fn a_lossless_plan_takes_an_arrangement_file_to_a_built_space() {
     }));
     let root: Arc<dyn Space> = Arc::new(Fallback::new(vec![
         Arc::new(EndpointSpace::new().bind_arc(Exact::new("urn:file:game.arrangement"), file)),
-        Arc::new(space()),
+        surface,
     ]));
     let kernel = Kernel::new(Arc::clone(&root));
     let issue = |request: Request| block_on(kernel.issue(request, &Capability::root())).unwrap();
@@ -1004,13 +1218,55 @@ fn a_lossless_plan_takes_an_arrangement_file_to_a_built_space() {
     assert_eq!(tree, coded.topology());
     build(&tree, &registry).unwrap();
 
-    // The reverse edge exists, and an s-expression that is NOT an arrangement never
-    // reaches this crate's reader: `text/x-sexpr` plans to the other transreptors.
+    // The reverse edge exists, and is lossless too.
     let back = select_transreptor(root.as_ref(), MEDIA_TURTLE, MEDIA_ARRANGEMENT).unwrap();
     assert_eq!(back[0].endpoint, "urn:sexpr:arrangement-from-rdf");
-    let other = select_transreptor(root.as_ref(), MEDIA_SEXPR, MEDIA_TURTLE).unwrap();
-    assert!(
-        other.iter().all(|s| !s.endpoint.contains("arrangement")),
-        "{other:?}"
+    assert!(back[0].lossless);
+    root
+}
+
+/// The arrangement surface alone — what a page mounts, built without the `full` feature — is
+/// everything the host's path needs, and binds nothing else.
+#[test]
+fn the_arrangement_space_alone_takes_an_arrangement_file_to_a_built_space() {
+    let surface = arrangement_space();
+    let bound: Vec<String> = match surface.topology().kind {
+        SpaceKind::EndpointSpace { doors } => doors.into_iter().map(|d| d.pattern).collect(),
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(
+        bound,
+        [
+            "urn:sexpr:arrangement-to-rdf",
+            "urn:sexpr:arrangement-from-rdf"
+        ]
     );
+    host_path(Arc::new(surface));
+}
+
+/// Beside every other surface, the plan still picks this crate's transreptor, and an
+/// s-expression that is NOT an arrangement never reaches this crate's reader: `text/x-sexpr`
+/// has no lossless route to plain Turtle at all (`urn:rdf:from-sexpr` interprets a
+/// `(graph …)`, so it is declared lossy, ledger #645), and with the caller's consent it plans
+/// to that one, reported lossy.
+#[cfg(feature = "full")]
+#[test]
+fn a_lossless_plan_takes_an_arrangement_file_to_a_built_space() {
+    let root = host_path(Arc::new(space()));
+    assert_eq!(
+        select_transreptor(root.as_ref(), MEDIA_SEXPR, MEDIA_TURTLE),
+        None
+    );
+    let other = select_transreptor_with(
+        root.as_ref(),
+        MEDIA_SEXPR,
+        MEDIA_TURTLE,
+        &TransreptionPolicy::allow_lossy(),
+    )
+    .unwrap();
+    let hops: Vec<(&str, bool)> = other
+        .iter()
+        .map(|s| (s.endpoint.as_str(), s.lossless))
+        .collect();
+    assert_eq!(hops, [("urn:rdf:from-sexpr", false)]);
 }
