@@ -12,28 +12,49 @@ categories = ["compilers", "parser-implementations"]
 
 [dependencies]
 # The published kernel, consumed from crates.io — the SAME version the hosts use,
-# so a host links exactly one `ikigai-core`. 0.1.83 is the floor because the arrangement
-# surface goes THROUGH core's `Topology` (`Door`, `MatchKind`, `TopologyRule`, and
-# `Topology::from_turtle` behind the `declare` feature, all new in 0.1.78–0.1.83).
-# ⚠ Under 0.x caret rules this is also a CEILING: `^0.1.83` admits 0.1.83 up to, not
-# including, 0.2.0. `declare` brings `oxttl` (and `oxrdf`, already a dependency here).
+# so a host links exactly one `ikigai-core`. 0.1.84 is the floor because the arrangement
+# surface relies on core's declaration BOUNDS (`MAX_DECLARATION_DEPTH`/`_NODES`/`_TEXT` and
+# `DeclarationError::TooLarge`, new in 0.1.84): `Topology::from_turtle` refuses an oversized
+# document itself, so this crate no longer measures Turtle before handing it over, and the
+# s-expression reader counts in core's units so the two refuse alike. It goes THROUGH core's
+# `Topology` (`Door`, `MatchKind`, `TopologyRule`, and `Topology::from_turtle` behind the
+# `declare` feature, 0.1.78–0.1.83) as before.
+# ⚠ Under 0.x caret rules this is also a CEILING: `^0.1.84` admits 0.1.84 up to, not
+# including, 0.2.0. `declare` brings `oxttl` and `oxrdf`.
 # The `Sexpr` datum, reader, printer, and the SPARQL/Turtle compilers stay kernel-free.
-ikigai-core = { version = "0.1.83", features = ["declare"] }
+ikigai-core = { version = "0.1.84", features = ["declare"] }
 async-trait = "0.1"
 
 # Slice 3c.2 lossless code-as-graph: the encoder content-addresses cons cells with a
 # deterministic hash, and the decoder parses the emitted Turtle back to a `Sexpr`. Both
-# live in the PURE (kernel-free) layer, so these are runtime — not dev — deps now.
+# live in the PURE (kernel-free) layer, so these are runtime — not dev — deps, behind the
+# `full` feature (see [features]): the arrangement surface needs none of them.
 # `sha2` (RustCrypto) and Oxigraph's pure-Rust `oxrdf`/`oxrdfio` are all wasm-clean.
-sha2 = "0.10"
-oxrdf = "0.3"
-oxrdfio = "0.2"
+sha2 = { version = "0.10", optional = true }
+oxrdf = { version = "0.3", optional = true }
+oxrdfio = { version = "0.2", optional = true }
 
-# oxrdf/oxrdfio pull getrandom 0.3; its wasm backend must be selected explicitly (paired
-# with the `getrandom_backend` cfg in .cargo/config.toml) so the lib still builds for
-# wasm32 — the crate's browser face. Not used directly.
+# oxrdf (through core's `declare`, and directly under `full`) pulls getrandom 0.3; its wasm
+# backend must be selected explicitly (paired with the `getrandom_backend` cfg in
+# .cargo/config.toml) so the lib still builds for wasm32 — the crate's browser face. Not
+# used directly.
 [target.'cfg(target_family = "wasm")'.dependencies]
 getrandom = { version = "0.3", features = ["wasm_js"] }
+
+[features]
+# Every surface, and `space()`, which mounts them all: the query and graph compilers as
+# endpoints (`urn:sparql:from-sexpr`, `urn:rdf:from-sexpr`) and the lossless code-graph codec
+# (`sexpr_to_rdf`/`rdf_to_sexpr`, `urn:sexpr:to-rdf`/`from-rdf`). On by default, so a
+# consumer that says nothing gets exactly what 0.1.4 gave it.
+#
+# Off (`default-features = false`), the crate is the datum, its reader and printer, the two
+# pure compilers, and the ARRANGEMENT surface — `arrangement_space()` and the functions it
+# is built from — compiling neither `sha2` nor `oxrdfio` (and so neither of oxrdfio's RDF/XML
+# and JSON-LD parsers). That is the build for a page that only reads arrangements: ledger
+# #649 measured the tutorial's tic-tac-toe page paying ~170 KB gzip for surfaces it never
+# mounted. CI's `arrangement only` job holds this configuration to the same gates.
+default = ["full"]
+full = ["dep:sha2", "dep:oxrdf", "dep:oxrdfio"]
 
 [dev-dependencies]
 futures = "0.3" # block_on for the async endpoint test
@@ -56,3 +77,9 @@ ikigai-sparql = "0.1.5"
 # The full Oxigraph engine (the same one `ikigai-sparql` wraps) as a dev-dep ONLY, to run a
 # real SPARQL query over an ENCODED program — proving the 3c.2 code-graph is govern-queryable.
 oxigraph = { version = "0.5", default-features = false }
+
+# The module recipe walks every endpoint `space()` binds, and `space()` is the `full` surface.
+# Default features cover it, so the shared CI gates (which run defaults) still see it.
+[[test]]
+name = "conformance"
+required-features = ["full"]

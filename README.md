@@ -17,14 +17,26 @@ pub fn write(&Sexpr) -> String;                    // datum -> text
 
 ## The six surfaces
 
-| endpoint | transreption | what it does |
-|---|---|---|
-| `urn:sparql:from-sexpr` | `text/x-sexpr → application/sparql-query` | a **SELECT query** as an s-expr → SPARQL |
-| `urn:rdf:from-sexpr` | `text/x-sexpr → text/turtle` | an **RDF graph** as an s-expr → Turtle (author graphs) |
-| `urn:sexpr:to-rdf` | `text/x-sexpr → text/turtle` (code-graph profile) | **any s-expr → a lossless, content-addressed RDF graph** (put code in the fabric) |
-| `urn:sexpr:from-rdf` | `text/turtle → text/x-sexpr` | the exact inverse of `to-rdf` |
-| `urn:sexpr:arrangement-to-rdf` | `text/x-ikigai-arrangement → text/turtle` | a **kernel's arrangement** as an s-expr → the `ik:` Turtle core builds a space from (lossless) |
-| `urn:sexpr:arrangement-from-rdf` | `text/turtle → text/x-ikigai-arrangement` | the exact inverse: an arrangement's Turtle → its canonical s-expr |
+| endpoint | transreption | declared | what it does |
+|---|---|---|---|
+| `urn:sparql:from-sexpr` | `text/x-sexpr → application/sparql-query` | lossy | a **SELECT query** as an s-expr → SPARQL |
+| `urn:rdf:from-sexpr` | `text/x-sexpr → text/turtle` | lossy | an **RDF graph** as an s-expr → Turtle (author graphs) |
+| `urn:sexpr:to-rdf` | `text/x-sexpr → text/turtle` (code-graph profile) | lossless | **any s-expr → a lossless, content-addressed RDF graph** (put code in the fabric) |
+| `urn:sexpr:from-rdf` | `text/turtle → text/x-sexpr` | lossy | the inverse of `to-rdf`, exact on a code-graph |
+| `urn:sexpr:arrangement-to-rdf` | `text/x-ikigai-arrangement → text/turtle` | lossless | a **kernel's arrangement** as an s-expr → the `ik:` Turtle core builds a space from |
+| `urn:sexpr:arrangement-from-rdf` | `text/turtle → text/x-ikigai-arrangement` | lossless | the exact inverse: an arrangement's Turtle → its canonical s-expr |
+
+**Why three are lossy.** A transreptor that says nothing is declared lossless (core
+0.1.77), and a lossless-only planner routes through it as if the output were the same
+resource in another form. `text/x-sexpr` names an s-expression *datum*, and the two
+compilers interpret the datum under one profile rather than encoding it: clauses are put in
+canonical order, `pfx` and `pfx:` are one prefix, a graph's triples are a set, and anything
+that is not a `(select …)` or a `(graph …)` is refused. Distinct datums give one output,
+and nothing maps it back. `urn:sexpr:from-rdf` reads *any* Turtle and skips every triple
+that is not part of the code-graph — an extraction, so two different graphs give one
+s-expression; it is exact on a code-graph itself. Call any of the three by name, or plan
+through it with the caller's consent; a plan that does reports the step as lossy. The
+code-graph encoder and the arrangement pair are lossless, and say so by saying nothing.
 
 Each is backed by a pure function you can also call directly: `sexpr_to_sparql`,
 `sexpr_to_turtle`, `sexpr_to_rdf`, `rdf_to_sexpr` (kernel-free), and
@@ -183,11 +195,18 @@ endpoint name, where an option sits, a `:match` the pattern already implies, a
 restated space instead of a `ref`, alias rules written out of table order). Back from
 Turtle, an arrangement prints in the canonical form above.
 
-The media type is deliberately not `text/x-sexpr`: `urn:sexpr:to-rdf` and
-`urn:rdf:from-sexpr` already transrept that to Turtle, so a lossless planner could hand
-the builder the wrong graph. Documents are bounded (`MAX_ARRANGEMENT_DEPTH`,
-`MAX_ARRANGEMENT_NODES`), a Turtle document included, before core reads it. The full
-grammar and every refusal are in the `arrangement` module docs.
+The media type is deliberately not `text/x-sexpr`: `urn:sexpr:to-rdf` already
+transrepts that to Turtle (and `urn:rdf:from-sexpr` does with consent), so a planner could
+hand the builder the wrong graph.
+
+**Bounded by core's bounds, in core's units.** An arrangement is held to
+`ikigai_core::MAX_DECLARATION_DEPTH` (48 spaces deep — a door's confined corridor is a level,
+the door is not), `MAX_DECLARATION_NODES` (65,536 spaces, doors and alias rules) and
+`MAX_DECLARATION_TEXT` (16 MiB), a named space counted again at every place it is used. A
+Turtle document is core's own to refuse as it reads it; the s-expression reader counts the
+same way as it reads, and both refuse with core's typed `DeclarationError::TooLarge`, in
+`ArrangementError::declaration`, naming the same node. The full grammar and every refusal
+are in the `arrangement` module docs.
 
 ## Conformance
 
@@ -235,6 +254,24 @@ Two things the endpoints deliberately declare, both pinned by that test:
 let space = ikigai_sexpr::space(); // binds all six endpoints
 // mount into your kernel alongside the SPARQL/RDF modules
 ```
+
+A host — or a page in a browser — that only reads arrangements mounts the arrangement
+pair alone, and builds the crate without the default `full` feature, so nothing else is
+compiled:
+
+```toml
+ikigai-sexpr = { version = "0.1", default-features = false }
+```
+```rust,ignore
+let space = ikigai_sexpr::arrangement_space(); // urn:sexpr:arrangement-to-rdf / -from-rdf
+```
+
+`full` (on by default) is the code-graph codec (`sexpr_to_rdf`, `rdf_to_sexpr`), the four
+s-expression endpoints and `space()`; it is what brings `sha2` and `oxrdfio` (with its
+RDF/XML and JSON-LD parsers). Without it you keep the datum, the reader/printer, the two
+pure compilers and the arrangement surface. Measured on a wasm32 consumer (`opt-level = "z"`,
+LTO): a kernel mounting `space()` is 391 KB gzip, mounting `arrangement_space()` 241 KB,
+and an empty kernel 159 KB.
 
 `Sexpr`, the reader/printer, and the compilers are wasm-clean; the endpoints and the
 arrangement surface are the only parts that touch `ikigai-core`.

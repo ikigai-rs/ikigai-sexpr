@@ -66,25 +66,42 @@
 //! rules written out of table order). Printed back, an arrangement comes out in the canonical
 //! form [`topology_to_arrangement`] writes.
 //!
-//! ## Bounds
+//! ## Bounds: core's, in core's units
 //!
-//! The text goes through the crate's bounded [`parse`] reader, and the tree it describes is
-//! bounded again after `ref`s are expanded: at most [`MAX_ARRANGEMENT_DEPTH`] spaces and doors
-//! deep and [`MAX_ARRANGEMENT_NODES`] in all. A Turtle document is measured against the same
-//! bounds BEFORE core parses it, because core's reader expands a named node at every place
-//! it is referenced.
+//! An arrangement is held to the bounds core reads and builds a declaration within
+//! ([`MAX_DECLARATION_DEPTH`], [`MAX_DECLARATION_NODES`], [`MAX_DECLARATION_TEXT`]), counted
+//! the way core counts them, and a document past one is refused with core's own typed
+//! refusal, [`DeclarationError::TooLarge`], in [`ArrangementError::declaration`]:
+//!
+//! - **depth**: the root space is 1, and every space it encloses — a layer, the space a
+//!   mount, an alias or a level encloses, a door's confined corridor — is one deeper (a door
+//!   is not a level of its own);
+//! - **nodes**: every space, every door and every alias rule, a named space counted again at
+//!   every place it is used — so a `ref` costs everything it stands for;
+//! - **text**: the bytes those nodes carry (every IRI a space claims, every pattern, endpoint
+//!   name, prefix, family, rule, seal and namespace), counted the same way.
+//!
+//! A Turtle document is core's to refuse: [`Topology::from_turtle`] counts as it reads, so a
+//! small document that would expand exponentially is refused after the bound, not after the
+//! expansion. The s-expression reader counts in the same units AS IT READS, for the same
+//! reason (a `ref` is one line of text and a whole subtree of the tree), and names the node
+//! the way core would — a space's own IRI, an anonymous one numbered in pre-order under
+//! `urn:ikigai:space:_:`, and anything inside a named space placed again named as that space
+//! — so the two paths refuse an arrangement alike. The one difference: at a `ref`, depth is
+//! checked before size, where core, walking the expanded subtree, meets whichever bound its
+//! pre-order reaches first. The text itself first goes through the crate's bounded [`parse`]
+//! reader.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use async_trait::async_trait;
 use ikigai_core::{
-    ArgSpec, DeclarationError, Description, Door, Endpoint, Error as CoreError, Invocation, Iri,
-    MatchKind, ReprType, Representation, Result as CoreResult, RuleKind, SpaceKind, Topology,
-    TopologyRule, UriTemplate, Verb, DEFAULT_MAX_HOPS,
+    ArgSpec, DeclarationBound, DeclarationError, Description, Door, Endpoint, EndpointSpace,
+    Error as CoreError, Exact, Invocation, Iri, MatchKind, ReprType, Representation,
+    Result as CoreResult, RuleKind, SpaceKind, Topology, TopologyRule, UriTemplate, Verb,
+    DEFAULT_MAX_HOPS, MAX_DECLARATION_DEPTH, MAX_DECLARATION_NODES, MAX_DECLARATION_TEXT,
 };
-use oxrdf::{NamedOrBlankNode, Term};
-use oxrdfio::{RdfFormat, RdfParser};
 
 use crate::{
     content_summary, in_summary, parse, read_source, render_string_literal, Sexpr, MEDIA_TURTLE,
@@ -92,47 +109,60 @@ use crate::{
 };
 
 /// The media type of an arrangement written as an s-expression: an `*.arrangement` file.
-/// DISTINCT from [`text/x-sexpr`](crate::MEDIA_SEXPR) on purpose: `urn:sexpr:to-rdf` and
-/// `urn:rdf:from-sexpr` already transrept `text/x-sexpr` to Turtle, so a lossless selector over
-/// that type could pick one of them and hand the builder a list graph or a domain graph.
+/// DISTINCT from [`text/x-sexpr`](crate::MEDIA_SEXPR) on purpose: `urn:sexpr:to-rdf` already
+/// transrepts `text/x-sexpr` to Turtle losslessly (and `urn:rdf:from-sexpr` with the caller's
+/// consent), so a selector over that type could pick one of them and hand the builder a list
+/// graph or a domain graph.
 pub const MEDIA_ARRANGEMENT: &str = "text/x-ikigai-arrangement";
 
-/// How deep an arrangement may nest, counting every space and every door on the way down
-/// (the root is 1). Real arrangements are a handful deep; the bound exists so a hostile
-/// document is a clean refusal rather than a stack overflow in the recursive walks — this
-/// crate's and core's (`to_turtle`, `from_turtle`, `build`). Set by measurement: core's
-/// `from_turtle` is the heaviest, at roughly 19 KB of stack per level in a debug build (a
-/// chain of fallbacks overflowed a 2 MiB thread at about 110 levels), so 48 fits a 1 MiB
-/// thread and leaves a 2 MiB worker (tokio's default) twice the room it needs.
-pub const MAX_ARRANGEMENT_DEPTH: usize = 48;
+/// What this crate bounded an arrangement's depth by in 0.1.4: now core's bound, in core's
+/// units, which count spaces and not doors.
+#[deprecated(
+    since = "0.1.5",
+    note = "an arrangement is held to core's declaration bounds, in core's units: use \
+            `ikigai_core::MAX_DECLARATION_DEPTH`, which counts spaces (a door is not a level)"
+)]
+pub const MAX_ARRANGEMENT_DEPTH: usize = MAX_DECLARATION_DEPTH;
 
-/// How many spaces and doors an arrangement may hold once every `ref` is expanded. A `ref`
-/// is one line of text and a whole subtree of the tree, so without this a few lines that
-/// reference each other double at every step (the "billion laughs" shape).
-pub const MAX_ARRANGEMENT_NODES: usize = 65_536;
+/// What this crate bounded an arrangement's size by in 0.1.4: now core's bound, in core's
+/// units, which count alias rules as well as spaces and doors.
+#[deprecated(
+    since = "0.1.5",
+    note = "an arrangement is held to core's declaration bounds, in core's units: use \
+            `ikigai_core::MAX_DECLARATION_NODES` (spaces, doors and alias rules) and \
+            `ikigai_core::MAX_DECLARATION_TEXT`"
+)]
+pub const MAX_ARRANGEMENT_NODES: usize = MAX_DECLARATION_NODES;
 
 /// Where core numbers anonymous nodes: a node IRI under it reads back as anonymous, so an
 /// `:id` there would not survive the round trip. Core keeps the constant crate-private; the
-/// prefix is part of the Turtle it writes (`Topology::to_turtle`).
+/// prefix is part of the Turtle it writes (`Topology::to_turtle`), and the name a bound's
+/// refusal gives an anonymous node.
 const SKOLEM_PREFIX: &str = "urn:ikigai:space:_:";
 
-const IK: &str = "https://ikigai-rs.dev/ns#";
-const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
-
-/// The `ik:` classes a space node or a door is typed with: what the bounds count.
-const COUNTED_KINDS: [&str; 11] = [
-    "OpaqueSpace",
-    "EndpointSpace",
-    "Fallback",
-    "Mount",
-    "Rewrite",
-    "Alias",
-    "Limit",
-    "Confine",
-    "Level",
-    "Chain",
-    "Door",
-];
+/// **Mount the arrangement surface alone**: `urn:sexpr:arrangement-to-rdf` and
+/// `urn:sexpr:arrangement-from-rdf`, and nothing else. What a host that reads `*.arrangement`
+/// files needs, and all a page in a browser should pay for: with the crate's default `full`
+/// feature off, nothing else in the crate is compiled.
+///
+/// ```
+/// use std::sync::Arc;
+/// use ikigai_core::{select_transreptor, Space};
+/// use ikigai_sexpr::{arrangement_space, MEDIA_ARRANGEMENT, MEDIA_TURTLE};
+///
+/// let space: Arc<dyn Space> = Arc::new(arrangement_space());
+/// let plan = select_transreptor(space.as_ref(), MEDIA_ARRANGEMENT, MEDIA_TURTLE).unwrap();
+/// assert_eq!(plan[0].endpoint, "urn:sexpr:arrangement-to-rdf");
+/// assert!(plan[0].lossless);
+/// ```
+pub fn arrangement_space() -> EndpointSpace {
+    EndpointSpace::new()
+        .bind(Exact::new("urn:sexpr:arrangement-to-rdf"), ArrangementToRdf)
+        .bind(
+            Exact::new("urn:sexpr:arrangement-from-rdf"),
+            ArrangementFromRdf,
+        )
+}
 
 /// Why an arrangement was refused: where, and why.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -145,6 +175,35 @@ pub struct ArrangementError {
     pub at: String,
     /// What is wrong.
     pub reason: String,
+    /// Core's own typed refusal, when the arrangement was refused by a rule of core's: a
+    /// [`DeclarationError::TooLarge`] past one of the declaration bounds (from either path —
+    /// the s-expression reader counts in core's units and refuses with core's error), or
+    /// whatever [`Topology::from_turtle`] refused a Turtle document for. `None` when the
+    /// refusal is this surface's own (its grammar, a name claimed twice). `reason` is then
+    /// that error's text.
+    ///
+    /// ```
+    /// use ikigai_core::{DeclarationBound, DeclarationError, MAX_DECLARATION_DEPTH};
+    /// use ikigai_sexpr::arrangement_to_topology;
+    ///
+    /// // One fallback more than the bound allows, every one anonymous: core numbers the
+    /// // 49th `urn:ikigai:space:_:49`, and so does the reader.
+    /// let deep = format!(
+    ///     "{}(limit \"urn:x:\"){}",
+    ///     "(fallback ".repeat(MAX_DECLARATION_DEPTH),
+    ///     ")".repeat(MAX_DECLARATION_DEPTH)
+    /// );
+    /// let refused = arrangement_to_topology(&deep).unwrap_err();
+    /// assert_eq!(
+    ///     refused.declaration.as_deref(),
+    ///     Some(&DeclarationError::TooLarge {
+    ///         bound: DeclarationBound::Depth,
+    ///         limit: 48,
+    ///         node: "urn:ikigai:space:_:49".into(),
+    ///     })
+    /// );
+    /// ```
+    pub declaration: Option<Box<DeclarationError>>,
 }
 
 impl ArrangementError {
@@ -152,6 +211,16 @@ impl ArrangementError {
         ArrangementError {
             at: at.into(),
             reason: reason.into(),
+            declaration: None,
+        }
+    }
+
+    /// Core's refusal `error`, found at `at`.
+    fn core(at: impl Into<String>, error: Box<DeclarationError>) -> Self {
+        ArrangementError {
+            at: at.into(),
+            reason: error.to_string(),
+            declaration: Some(error),
         }
     }
 
@@ -196,13 +265,15 @@ type Result<T> = std::result::Result<T, ArrangementError>;
 /// ```
 pub fn arrangement_to_topology(src: &str) -> Result<Topology> {
     let form = parse(src).map_err(|e| ArrangementError::document(e.detail()))?;
-    Reader::default().space(&form, "root", 1)
+    Reader::default().space(&form, "root", 1, None)
 }
 
-/// A named space already read: the tree, and how much of the bounds it spends.
+/// A named space already read: the tree, and what it costs in core's units each time it is
+/// placed again — its nodes, its text, and how many spaces deep it goes.
 struct Claimed {
     tree: Topology,
     nodes: usize,
+    text: usize,
     height: usize,
 }
 
@@ -210,8 +281,179 @@ struct Claimed {
 struct Reader {
     /// Every named space read so far, by IRI.
     named: BTreeMap<String, Claimed>,
-    /// Spaces and doors in the tree so far, with every `ref` expanded.
+    /// The arrangement's size so far, as core counts it.
+    tally: Tally,
+}
+
+// =====================================================================================
+// The bounds, counted as core counts them
+// =====================================================================================
+
+/// One node's own share of the bounds, as core charges it: itself, its doors and its alias
+/// rules, and the text they carry — never its children or its doors' corridors, which are
+/// nodes of their own. Mirrors core's private `Budget::charge` (ikigai-core 0.1.84,
+/// `declare.rs`); `tests/arrangement.rs` holds the two to the same refusal on every bound.
+fn share(id: Option<&Iri>, kind: &SpaceKind) -> (usize, usize) {
+    let mut nodes = 1;
+    let mut text = id.map_or(0, |id| id.as_str().len());
+    match kind {
+        SpaceKind::EndpointSpace { doors } => {
+            nodes += doors.len();
+            text += doors
+                .iter()
+                .map(|d| d.pattern.len() + d.endpoint.len())
+                .sum::<usize>();
+        }
+        SpaceKind::Alias { rules, .. } => {
+            nodes += rules.len();
+            text += rules
+                .iter()
+                .map(|r| r.from.len() + r.to.len())
+                .sum::<usize>();
+        }
+        SpaceKind::Mount { prefix } => text += prefix.len(),
+        SpaceKind::Limit { family, .. } => text += family.len(),
+        SpaceKind::Level { seals, namespace } => {
+            text += seals.iter().map(String::len).sum::<usize>();
+            text += namespace.as_ref().map_or(0, String::len);
+        }
+        _ => {}
+    }
+    (nodes, text)
+}
+
+/// A whole tree's cost in core's units: nodes, text, and depth (the root is 1). Recursive;
+/// only ever called on a tree the reader has already bounded.
+fn size(tree: &Topology) -> (usize, usize, usize) {
+    let (mut nodes, mut text) = share(tree.id.as_ref(), &tree.kind);
+    let mut below = 0;
+    let corridors = match &tree.kind {
+        SpaceKind::EndpointSpace { doors } => {
+            doors.iter().filter_map(|d| d.confined.as_deref()).collect()
+        }
+        _ => Vec::new(),
+    };
+    for inner in tree.children.iter().chain(corridors) {
+        let (n, t, h) = size(inner);
+        nodes = nodes.saturating_add(n);
+        text = text.saturating_add(t);
+        below = below.max(h);
+    }
+    (nodes, text, below + 1)
+}
+
+/// The running count of an arrangement against core's bounds, meeting nodes in the order
+/// core's own measure does (pre-order: a node, then its children, then its doors'
+/// corridors in door order) so that a refusal names the node core would name.
+#[derive(Default)]
+struct Tally {
+    /// Every name met so far: a name met again is a space placed again, and everything under
+    /// it is charged to that name.
+    seen: BTreeSet<String>,
+    /// Anonymous spaces met so far, outside any space placed again: the next one's number.
+    skolem: usize,
     nodes: usize,
+    text: usize,
+}
+
+impl Tally {
+    /// Meet one node at `depth`, `again` naming the space placed again it lies under (if
+    /// any): name it, check its depth, and charge its own share. Returns the name its
+    /// descendants are charged under — `Some` inside a space placed again.
+    fn meet(
+        &mut self,
+        id: Option<&Iri>,
+        kind: &SpaceKind,
+        depth: usize,
+        again: Option<&str>,
+    ) -> std::result::Result<Option<String>, Box<DeclarationError>> {
+        let (me, below) = match (again, id) {
+            (Some(outer), _) => (outer.to_string(), Some(outer.to_string())),
+            (None, Some(id)) => {
+                let me = id.as_str().to_string();
+                if self.seen.insert(me.clone()) {
+                    (me, None)
+                } else {
+                    (me.clone(), Some(me))
+                }
+            }
+            (None, None) => {
+                self.skolem += 1;
+                (format!("{SKOLEM_PREFIX}{}", self.skolem), None)
+            }
+        };
+        if depth > MAX_DECLARATION_DEPTH {
+            return Err(too_large(DeclarationBound::Depth, &me));
+        }
+        let (nodes, text) = share(id, kind);
+        self.charge(nodes, text, &me)?;
+        Ok(below)
+    }
+
+    /// Place a named space again, at `depth`: everything it holds is charged again, to `me`.
+    fn again(
+        &mut self,
+        claimed: &Claimed,
+        depth: usize,
+        me: &str,
+    ) -> std::result::Result<(), Box<DeclarationError>> {
+        if depth - 1 + claimed.height > MAX_DECLARATION_DEPTH {
+            return Err(too_large(DeclarationBound::Depth, me));
+        }
+        self.charge(claimed.nodes, claimed.text, me)
+    }
+
+    fn charge(
+        &mut self,
+        nodes: usize,
+        text: usize,
+        me: &str,
+    ) -> std::result::Result<(), Box<DeclarationError>> {
+        self.nodes = self.nodes.saturating_add(nodes);
+        self.text = self.text.saturating_add(text);
+        if self.nodes > MAX_DECLARATION_NODES {
+            Err(too_large(DeclarationBound::Nodes, me))
+        } else if self.text > MAX_DECLARATION_TEXT {
+            Err(too_large(DeclarationBound::Text, me))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+/// Core's refusal for a declaration past `bound`, at the node `node`.
+fn too_large(bound: DeclarationBound, node: &str) -> Box<DeclarationError> {
+    Box::new(DeclarationError::TooLarge {
+        bound,
+        limit: bound.limit(),
+        node: node.to_string(),
+    })
+}
+
+/// Check a tree the caller built against core's bounds WITHOUT recursing — an explicit stack,
+/// so a tree far deeper than the bound is refused rather than overflowing the check. The
+/// same walk as core's private `measure` (which `build` runs), so a tree passes here exactly
+/// when core would build it. Core does not export that check; this copy is the gap.
+fn check(tree: &Topology) -> Result<()> {
+    let mut tally = Tally::default();
+    // (node, its depth, the space placed again that it lies under, if any)
+    let mut stack: Vec<(&Topology, usize, Option<String>)> = vec![(tree, 1, None)];
+    while let Some((node, depth, again)) = stack.pop() {
+        let below = tally
+            .meet(node.id.as_ref(), &node.kind, depth, again.as_deref())
+            .map_err(from_declaration)?;
+        // Pushed in reverse, so they pop in core's order: the children, then each door's
+        // corridor in door order.
+        if let SpaceKind::EndpointSpace { doors } = &node.kind {
+            for corridor in doors.iter().rev().filter_map(|d| d.confined.as_deref()) {
+                stack.push((corridor, depth + 1, below.clone()));
+            }
+        }
+        for child in node.children.iter().rev() {
+            stack.push((child, depth + 1, below.clone()));
+        }
+    }
+    Ok(())
 }
 
 /// A form taken apart: its head, its positional parts in order, and its `:key value`
@@ -431,61 +673,32 @@ fn not_a_space(head: &str, at: &str) -> ArrangementError {
     ArrangementError::new(at, reason)
 }
 
-/// How many spaces and doors a tree holds, and how deep it goes.
-fn measure(tree: &Topology) -> (usize, usize) {
-    let mut nodes = 1;
-    let mut height = 0;
-    if let SpaceKind::EndpointSpace { doors } = &tree.kind {
-        for door in doors {
-            nodes += 1;
-            let mut below = 0;
-            if let Some(corridor) = &door.confined {
-                let (n, h) = measure(corridor);
-                nodes += n;
-                below = h;
-            }
-            height = height.max(1 + below);
-        }
-    }
-    for child in &tree.children {
-        let (n, h) = measure(child);
-        nodes += n;
-        height = height.max(h);
-    }
-    (nodes, height + 1)
-}
-
 impl Reader {
-    /// Spend `n` nodes of the bound.
-    fn spend(&mut self, n: usize, at: &str) -> Result<()> {
-        self.nodes = self.nodes.saturating_add(n);
-        if self.nodes > MAX_ARRANGEMENT_NODES {
-            return Err(ArrangementError::new(
-                at,
-                format!(
-                    "the arrangement holds more than {MAX_ARRANGEMENT_NODES} spaces and doors \
-                     with every `ref` expanded"
-                ),
-            ));
-        }
-        Ok(())
+    /// Meet a node as core would (see [`Tally::meet`]), refusing at `here` with core's error.
+    fn meet(
+        &mut self,
+        id: Option<&Iri>,
+        kind: &SpaceKind,
+        depth: usize,
+        again: Option<&str>,
+        here: &str,
+    ) -> Result<Option<String>> {
+        self.tally
+            .meet(id, kind, depth, again)
+            .map_err(|e| ArrangementError::core(here, e))
     }
 
-    fn deep(depth: usize, at: &str) -> Result<()> {
-        if depth > MAX_ARRANGEMENT_DEPTH {
-            return Err(ArrangementError::new(
-                at,
-                format!(
-                    "the arrangement nests deeper than {MAX_ARRANGEMENT_DEPTH} spaces and doors"
-                ),
-            ));
-        }
-        Ok(())
-    }
-
-    /// Read one space form at `depth` (the root is 1).
-    fn space(&mut self, form: &Sexpr, at: &str, depth: usize) -> Result<Topology> {
-        Self::deep(depth, at)?;
+    /// Read one space form at `depth` (the root is 1), `again` naming the space placed again
+    /// that it lies under, if any. Each form reads its own parts first, then is met — named,
+    /// its depth checked, its share charged — and only then are the spaces it encloses read,
+    /// so the bounds stop a hostile document before the recursion or the expansion does.
+    fn space(
+        &mut self,
+        form: &Sexpr,
+        at: &str,
+        depth: usize,
+        again: Option<&str>,
+    ) -> Result<Topology> {
         let bare = |head: &str| format!("{at} ({head})");
         let p = parts(form, at, true)?;
         let head = p.head;
@@ -499,26 +712,48 @@ impl Reader {
             Some(id) => format!("{at} ({head} <{}>)", id.as_str()),
             None => bare(head),
         };
-        if head != "ref" {
-            self.spend(1, &here)?;
-        }
         let tree = match head {
             "endpoints" => {
                 p.allow(&here, &["id"])?;
                 let mut doors = Vec::with_capacity(p.args.len());
+                let mut corridors = Vec::new();
                 for (i, arg) in p.args.iter().enumerate() {
-                    doors.push(self.door(arg, &format!("{here} › door {}", i + 1), depth + 1)?);
+                    let at = format!("{here} › door {}", i + 1);
+                    let (door, corridor) = Self::door(arg, &at)?;
+                    if let Some(corridor) = corridor {
+                        corridors.push((i, corridor, at));
+                    }
+                    doors.push(door);
                 }
-                Topology::new(SpaceKind::EndpointSpace { doors }).with_id(id)
+                let mut kind = SpaceKind::EndpointSpace { doors };
+                let below = self.meet(id.as_ref(), &kind, depth, again, &here)?;
+                if let SpaceKind::EndpointSpace { doors } = &mut kind {
+                    for (i, form, at) in corridors {
+                        let at = format!("{at} › :confined");
+                        let corridor = self.space(form, &at, depth + 1, below.as_deref())?;
+                        if corridor.id.is_none() {
+                            return Err(ArrangementError::new(
+                                at,
+                                "a confined corridor is named by its confinement: give it an \
+                                 `:id`",
+                            ));
+                        }
+                        doors[i].confined = Some(Box::new(corridor));
+                    }
+                }
+                Topology::new(kind).with_id(id)
             }
             "fallback" => {
                 p.allow(&here, &["id"])?;
-                let mut tree = Topology::new(SpaceKind::Fallback).with_id(id);
+                let kind = SpaceKind::Fallback;
+                let below = self.meet(id.as_ref(), &kind, depth, again, &here)?;
+                let mut tree = Topology::new(kind).with_id(id);
                 for (i, arg) in p.args.iter().enumerate() {
                     tree = tree.child(self.space(
                         arg,
                         &format!("{here} › layer {}", i + 1),
                         depth + 1,
+                        below.as_deref(),
                     )?);
                 }
                 tree
@@ -533,15 +768,17 @@ impl Reader {
                     ));
                 };
                 let prefix = string(prefix, &here, "a mount's prefix")?;
-                Topology::new(SpaceKind::Mount {
+                let kind = SpaceKind::Mount {
                     prefix: prefix.to_string(),
-                })
-                .with_id(id)
-                .child(self.space(
+                };
+                let below = self.meet(id.as_ref(), &kind, depth, again, &here)?;
+                let inner = self.space(
                     inner,
                     &format!("{here} › space"),
                     depth + 1,
-                )?)
+                    below.as_deref(),
+                )?;
+                Topology::new(kind).with_id(id).child(inner)
             }
             "alias" => {
                 p.allow(&here, &["id", "max-hops"])?;
@@ -584,16 +821,18 @@ impl Reader {
                     table.push(Self::rule(rule, &format!("{here} › rule {}", i + 1))?);
                 }
                 in_table_order(&mut table);
-                Topology::new(SpaceKind::Alias {
+                let kind = SpaceKind::Alias {
                     rules: table,
                     max_hops,
-                })
-                .with_id(id)
-                .child(self.space(
+                };
+                let below = self.meet(id.as_ref(), &kind, depth, again, &here)?;
+                let inner = self.space(
                     inner,
                     &format!("{here} › space"),
                     depth + 1,
-                )?)
+                    below.as_deref(),
+                )?;
+                Topology::new(kind).with_id(id).child(inner)
             }
             "limit" => {
                 p.allow(&here, &["id", "match"])?;
@@ -608,11 +847,12 @@ impl Reader {
                 if kind == MatchKind::Template {
                     check_template(family, &here)?;
                 }
-                Topology::new(SpaceKind::Limit {
+                let kind = SpaceKind::Limit {
                     family: family.to_string(),
                     kind,
-                })
-                .with_id(id)
+                };
+                self.meet(id.as_ref(), &kind, depth, again, &here)?;
+                Topology::new(kind).with_id(id)
             }
             "level" => {
                 p.allow(&here, &["seals", "namespace"])?;
@@ -651,10 +891,15 @@ impl Reader {
                     Some(value) => Some(string(value, &here, "`:namespace`")?.to_string()),
                     None => None,
                 };
-                let inner = self.space(inner, &format!("{here} › space"), depth + 1)?;
-                Topology::new(SpaceKind::Level { seals, namespace })
-                    .with_id(Some(name))
-                    .child(inner)
+                let kind = SpaceKind::Level { seals, namespace };
+                let below = self.meet(Some(&name), &kind, depth, again, &here)?;
+                let inner = self.space(
+                    inner,
+                    &format!("{here} › space"),
+                    depth + 1,
+                    below.as_deref(),
+                )?;
+                Topology::new(kind).with_id(Some(name)).child(inner)
             }
             "ref" => {
                 p.allow(&here, &[])?;
@@ -676,10 +921,13 @@ impl Reader {
                         ),
                     ));
                 };
-                let (tree, nodes, height) = (claimed.tree.clone(), claimed.nodes, claimed.height);
-                Self::deep(depth - 1 + height, &here)?;
-                self.spend(nodes, &here)?;
-                return Ok(tree);
+                // A space placed again: core charges everything under it to its name, or to
+                // the space placed again that this ref itself lies under.
+                let me = again.unwrap_or(name);
+                self.tally
+                    .again(claimed, depth, me)
+                    .map_err(|e| ArrangementError::core(&here, e))?;
+                return Ok(claimed.tree.clone());
             }
             other => return Err(not_a_space(other, &bare(other))),
         };
@@ -701,12 +949,13 @@ impl Reader {
                 ),
             )),
             None => {
-                let (nodes, height) = measure(&tree);
+                let (nodes, text, height) = size(&tree);
                 self.named.insert(
                     id,
                     Claimed {
                         tree: tree.clone(),
                         nodes,
+                        text,
                         height,
                     },
                 );
@@ -715,10 +964,10 @@ impl Reader {
         }
     }
 
-    /// Read one `(door …)` at `depth`.
-    fn door(&mut self, form: &Sexpr, at: &str, depth: usize) -> Result<Door> {
-        Self::deep(depth, at)?;
-        self.spend(1, at)?;
+    /// Read one `(door …)`'s own parts, returning the door and its `:confined` corridor's
+    /// form, unread: the corridor is a space of its own, read after the space that holds the
+    /// door has been met, as core meets them.
+    fn door<'a>(form: &'a Sexpr, at: &str) -> Result<(Door, Option<&'a Sexpr>)> {
         let p = parts(form, at, false)?;
         if p.head != "door" {
             return Err(ArrangementError::new(
@@ -769,18 +1018,7 @@ impl Reader {
             MatchKind::Template => check_template(pattern, at)?,
             _ => {}
         }
-        let mut door = Door::new(pattern, kind, endpoint);
-        if let Some(corridor) = p.option("confined") {
-            let corridor = self.space(corridor, &format!("{at} › :confined"), depth + 1)?;
-            if corridor.id.is_none() {
-                return Err(ArrangementError::new(
-                    format!("{at} › :confined"),
-                    "a confined corridor is named by its confinement: give it an `:id`",
-                ));
-            }
-            door = door.confined_to(corridor);
-        }
-        Ok(door)
+        Ok((Door::new(pattern, kind, endpoint), p.option("confined")))
     }
 
     /// Read one alias rule.
@@ -911,19 +1149,7 @@ fn count(at: &str, takes: &str, args: &[&Sexpr]) -> ArrangementError {
 /// );
 /// ```
 pub fn topology_to_arrangement(tree: &Topology) -> Result<String> {
-    let (nodes, height) = measure(tree);
-    if height > MAX_ARRANGEMENT_DEPTH {
-        return Err(ArrangementError::new(
-            "root",
-            format!("the arrangement nests deeper than {MAX_ARRANGEMENT_DEPTH} spaces and doors"),
-        ));
-    }
-    if nodes > MAX_ARRANGEMENT_NODES {
-        return Err(ArrangementError::new(
-            "root",
-            format!("the arrangement holds more than {MAX_ARRANGEMENT_NODES} spaces and doors"),
-        ));
-    }
+    check(tree)?;
     let block = Printer::default().space(tree, "root")?;
     let mut out = String::new();
     block.render(0, &mut out);
@@ -1223,18 +1449,23 @@ pub fn arrangement_to_turtle(src: &str) -> Result<String> {
              different arrangement (a node's `:id` colliding with an IRI core writes for a door, \
              a list cell or a rule?) — refused rather than transrepted lossily",
         )),
-        Err(e) => Err(ArrangementError::document(format!(
-            "the arrangement does not survive its own Turtle: core refuses its rendering: {e}"
-        ))),
+        Err(e) => {
+            let mut refused = from_declaration(e);
+            refused.reason = format!(
+                "the arrangement does not survive its own Turtle: core refuses its rendering: {}",
+                refused.reason
+            );
+            Err(refused)
+        }
     }
 }
 
-/// **Turtle as an arrangement**: measure the document against the bounds, read it with
-/// core's [`Topology::from_turtle`], print it in canonical form
-/// ([`topology_to_arrangement`]), and read the text back — refusing to answer unless it reads
-/// back as the same arrangement.
+/// **Turtle as an arrangement**: read it with core's [`Topology::from_turtle`] — which holds
+/// it to core's declaration bounds as it reads, so a document that would expand past them is
+/// refused with [`DeclarationError::TooLarge`] in [`ArrangementError::declaration`] — print it
+/// in canonical form ([`topology_to_arrangement`]), and read the text back, refusing to answer
+/// unless it reads back as the same arrangement.
 pub fn turtle_to_arrangement(turtle: &str) -> Result<String> {
-    measure_turtle(turtle)?;
     let tree = Topology::from_turtle(turtle).map_err(from_declaration)?;
     let text = topology_to_arrangement(&tree)?;
     if arrangement_to_topology(&text)? != in_table_order_throughout(&tree) {
@@ -1246,104 +1477,24 @@ pub fn turtle_to_arrangement(turtle: &str) -> Result<String> {
     Ok(text)
 }
 
-/// Core's refusal of a Turtle document, named as core names it.
-fn from_declaration(error: DeclarationError) -> ArrangementError {
-    match error {
+/// Core's refusal of a Turtle document, named as core names it, and kept typed in
+/// [`ArrangementError::declaration`].
+fn from_declaration(error: impl Into<Box<DeclarationError>>) -> ArrangementError {
+    let error = error.into();
+    match error.as_ref() {
         DeclarationError::Malformed {
             node: Some(node),
             reason,
-        } => ArrangementError::new(format!("<{node}>"), format!("not a declaration: {reason}")),
-        other => ArrangementError::document(other.to_string()),
+        } => ArrangementError {
+            at: format!("<{node}>"),
+            reason: format!("not a declaration: {reason}"),
+            declaration: Some(error.clone()),
+        },
+        DeclarationError::TooLarge { node, .. } => {
+            ArrangementError::core(format!("<{node}>"), error.clone())
+        }
+        _ => ArrangementError::core("", error),
     }
-}
-
-/// Measure a Turtle document against [`MAX_ARRANGEMENT_DEPTH`] and [`MAX_ARRANGEMENT_NODES`]
-/// BEFORE core reads it, in the same units the s-expression reader counts: every node typed
-/// as a space or a door is one, reached through every path that reaches it (core's reader
-/// expands a named node at each reference). List cells, rules and `rdf:nil` count nothing.
-/// Iterative, so a hostile document cannot overflow the stack here either. A cycle is left
-/// for core to refuse by name.
-fn measure_turtle(turtle: &str) -> Result<()> {
-    let mut stated = HashSet::new();
-    let mut edges: HashMap<String, Vec<String>> = HashMap::new();
-    let mut counted: HashSet<String> = HashSet::new();
-    for quad in RdfParser::from_format(RdfFormat::Turtle).for_slice(turtle.as_bytes()) {
-        let quad = quad.map_err(|e| ArrangementError::document(format!("not Turtle: {e}")))?;
-        let NamedOrBlankNode::NamedNode(subject) = &quad.subject else {
-            continue; // core refuses a blank node by name
-        };
-        let Term::NamedNode(object) = &quad.object else {
-            continue;
-        };
-        let (s, o) = (subject.as_str(), object.as_str());
-        if quad.predicate.as_str() == RDF_TYPE {
-            if o.strip_prefix(IK)
-                .is_some_and(|kind| COUNTED_KINDS.contains(&kind))
-            {
-                counted.insert(s.to_string());
-            }
-            continue;
-        }
-        if stated.insert((
-            s.to_string(),
-            quad.predicate.as_str().to_string(),
-            o.to_string(),
-        )) {
-            edges.entry(s.to_string()).or_default().push(o.to_string());
-        }
-    }
-
-    // (nodes, height) per node, with every path expanded.
-    let mut memo: HashMap<&str, (usize, usize)> = HashMap::new();
-    let mut on_stack: HashSet<&str> = HashSet::new();
-    let none: &[String] = &[];
-    let roots: Vec<&str> = edges.keys().map(String::as_str).collect();
-    for root in roots {
-        if memo.contains_key(root) {
-            continue;
-        }
-        let mut stack: Vec<(&str, usize)> = vec![(root, 0)];
-        on_stack.insert(root);
-        while let Some(&(node, next)) = stack.last() {
-            let successors = edges.get(node).map_or(none, Vec::as_slice);
-            if let Some(successor) = successors.get(next) {
-                stack.last_mut().expect("the stack is not empty").1 += 1;
-                let successor = successor.as_str();
-                if !memo.contains_key(successor) && on_stack.insert(successor) {
-                    stack.push((successor, 0));
-                }
-                continue;
-            }
-            let own = usize::from(counted.contains(node));
-            let (mut nodes, mut height) = (own, 0);
-            for successor in successors {
-                if let Some(&(n, h)) = memo.get(successor.as_str()) {
-                    nodes = nodes.saturating_add(n);
-                    height = height.max(h);
-                }
-            }
-            let height = height + own;
-            if height > MAX_ARRANGEMENT_DEPTH {
-                return Err(ArrangementError::new(
-                    format!("<{node}>"),
-                    format!("the arrangement nests deeper than {MAX_ARRANGEMENT_DEPTH} spaces and doors"),
-                ));
-            }
-            if nodes > MAX_ARRANGEMENT_NODES {
-                return Err(ArrangementError::new(
-                    format!("<{node}>"),
-                    format!(
-                        "the arrangement holds more than {MAX_ARRANGEMENT_NODES} spaces and doors \
-                         with every reference to a named space expanded"
-                    ),
-                ));
-            }
-            memo.insert(node, (nodes, height));
-            on_stack.remove(node);
-            stack.pop();
-        }
-    }
-    Ok(())
 }
 
 // =====================================================================================
