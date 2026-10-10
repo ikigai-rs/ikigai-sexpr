@@ -82,7 +82,7 @@
 pub mod arrangement;
 pub use arrangement::{
     arrangement_space, arrangement_to_topology, arrangement_to_turtle, topology_to_arrangement,
-    turtle_to_arrangement, ArrangementError, MEDIA_ARRANGEMENT,
+    turtle_to_arrangement, ArrangementError, ARRANGEMENT_SPACE_ID, MEDIA_ARRANGEMENT,
 };
 #[allow(deprecated)] // re-exported so 0.1.4's public paths keep working; see their notes
 pub use arrangement::{MAX_ARRANGEMENT_DEPTH, MAX_ARRANGEMENT_NODES};
@@ -102,7 +102,7 @@ mod endpoints;
 pub struct ReadmeDoctests;
 
 #[cfg(feature = "full")]
-use ikigai_core::{EndpointSpace, Exact};
+use ikigai_core::{space_iri, EndpointSpace, Exact};
 use ikigai_core::{Error as CoreError, Invocation, Result as CoreResult};
 
 /// The s-expression media type this crate reads: an s-expr *document* as UTF-8 text.
@@ -1003,8 +1003,14 @@ fn render_lit_form(args: &[&Sexpr]) -> SexprResult<String> {
 /// (`text/x-ikigai-arrangement ↔ text/turtle`, see [`arrangement`]). The two compilers and
 /// `urn:sexpr:from-rdf` are declared lossy (the README says why); the rest are lossless.
 ///
+/// The space names itself [`SPACE_ID`] (`urn:iki:space:sexpr`): it reads nothing while it is
+/// built, so every call holds the same six doors, and the name is a true cache claim. A host
+/// that binds another door onto it gets an anonymous space back (core drops the name), and
+/// names what it built itself.
+///
 /// Needs the `full` feature (on by default). To mount only the arrangement pair, without
-/// compiling the rest, see [`arrangement_space`].
+/// compiling the rest, see [`arrangement_space`]; it holds fewer doors, so it claims a name of
+/// its own, [`ARRANGEMENT_SPACE_ID`].
 #[cfg(feature = "full")]
 pub fn space() -> EndpointSpace {
     EndpointSpace::new()
@@ -1020,7 +1026,13 @@ pub fn space() -> EndpointSpace {
             Exact::new("urn:sexpr:arrangement-from-rdf"),
             arrangement::ArrangementFromRdf,
         )
+        // Last: binding a door after naming would drop the name (core 0.1.89).
+        .named(space_iri("sexpr"))
 }
+
+/// The name [`space`] claims: `urn:iki:space:sexpr`.
+#[cfg(feature = "full")]
+pub const SPACE_ID: &str = "urn:iki:space:sexpr";
 
 /// The s-expr source: piped `content` (the transreptor/pipeline convention — a stage piped
 /// into a from-sexpr transreptor arrives as `content`), falling back to a named `in`.

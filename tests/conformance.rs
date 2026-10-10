@@ -30,13 +30,22 @@
 //! settling, and nothing under `ik:` is invented for it. Registered here, named in
 //! the README.
 //!
+//! ## Spaces (SPACE-NAME)
+//!
+//! Both constructors are declared **self-named**: neither takes a parameter or reads
+//! anything while it is built, so every call holds the same doors. [`space`] claims
+//! `urn:iki:space:sexpr`; [`arrangement_space`] holds two of its six doors, so it claims
+//! a name of its own, `urn:iki:space:sexpr:arrangement`. Declaring both lets the suite's
+//! cross-declaration rule catch the part ever claiming the whole's name.
+//!
 //! No opt-outs, and NAMES runs: every id is already a kebab-case noun.
 
 use ikigai_conformance::{Fixture, Suite};
 use ikigai_core::{ArgRef, Capability, Error, Iri, Kernel, Representation, Request, Verb};
 use ikigai_sexpr::{
-    arrangement_to_turtle, parse, sexpr_to_rdf, space, MEDIA_ARRANGEMENT, MEDIA_SEXPR,
-    MEDIA_SPARQL_QUERY, MEDIA_TURTLE, MEDIA_TURTLE_CODE_GRAPH, SX_NS,
+    arrangement_space, arrangement_to_turtle, parse, sexpr_to_rdf, space, ARRANGEMENT_SPACE_ID,
+    MEDIA_ARRANGEMENT, MEDIA_SEXPR, MEDIA_SPARQL_QUERY, MEDIA_TURTLE, MEDIA_TURTLE_CODE_GRAPH,
+    SPACE_ID, SX_NS,
 };
 use std::sync::Arc;
 
@@ -121,6 +130,8 @@ fn suite() -> Suite {
                 .pure(*id)
                 .cacheable(*id)
         })
+        .self_named_space("sexpr", space)
+        .self_named_space("sexpr:arrangement", arrangement_space)
 }
 
 fn kernel() -> Kernel {
@@ -157,6 +168,12 @@ fn conforms() {
         report.checks.skipped().count(),
         0,
         "every check runs: {report}"
+    );
+    // The exported names are the names the suite checked.
+    assert_eq!(ikigai_core::space_iri("sexpr").as_str(), SPACE_ID);
+    assert_eq!(
+        ikigai_core::space_iri("sexpr:arrangement").as_str(),
+        ARRANGEMENT_SPACE_ID
     );
 }
 

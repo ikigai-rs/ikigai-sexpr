@@ -12,17 +12,21 @@ categories = ["compilers", "parser-implementations"]
 
 [dependencies]
 # The published kernel, consumed from crates.io — the SAME version the hosts use,
-# so a host links exactly one `ikigai-core`. 0.1.84 is the floor because the arrangement
+# so a host links exactly one `ikigai-core`. 0.1.89 is the floor for `space_iri`, the name
+# both spaces claim (`urn:iki:space:sexpr`, `urn:iki:space:sexpr:arrangement`, ledger #987),
+# and because 0.1.89 is the release where binding a door onto a named space drops the name, so
+# a host that extends either space cannot carry the claim over different doors. Before that,
+# 0.1.84 was the floor because the arrangement
 # surface relies on core's declaration BOUNDS (`MAX_DECLARATION_DEPTH`/`_NODES`/`_TEXT` and
 # `DeclarationError::TooLarge`, new in 0.1.84): `Topology::from_turtle` refuses an oversized
 # document itself, so this crate no longer measures Turtle before handing it over, and the
 # s-expression reader counts in core's units so the two refuse alike. It goes THROUGH core's
 # `Topology` (`Door`, `MatchKind`, `TopologyRule`, and `Topology::from_turtle` behind the
 # `declare` feature, 0.1.78–0.1.83) as before.
-# ⚠ Under 0.x caret rules this is also a CEILING: `^0.1.84` admits 0.1.84 up to, not
+# ⚠ Under 0.x caret rules this is also a CEILING: `^0.1.89` admits 0.1.89 up to, not
 # including, 0.2.0. `declare` brings `oxttl` and `oxrdf`.
 # The `Sexpr` datum, reader, printer, and the SPARQL/Turtle compilers stay kernel-free.
-ikigai-core = { version = "0.1.84", features = ["declare"] }
+ikigai-core = { version = "0.1.89", features = ["declare"] }
 async-trait = "0.1"
 
 # Slice 3c.2 lossless code-as-graph: the encoder content-addresses cons cells with a
@@ -59,8 +63,10 @@ full = ["dep:sha2", "dep:oxrdf", "dep:oxrdfio"]
 [dev-dependencies]
 futures = "0.3" # block_on for the async endpoint test
 # The module recipe as one test (`tests/conformance.rs`): walks every endpoint
-# `space()` binds and reports every violation of the recipe at once. Dev-dep ONLY.
-ikigai-conformance = "0.2.0"
+# `space()` binds and reports every violation of the recipe at once. Dev-dep ONLY. 0.6.0
+# for SPACE-NAME: both spaces are declared self-named and held to it. ⚠ `^0.6.0` is `<0.7.0`:
+# a later suite is a deliberate re-pin, not something this range picks up.
+ikigai-conformance = "0.6.0"
 # Not used directly: the floor for the vocabulary conformance checks the Turtle faces
 # against. The arrangement Turtle uses the ik: arrangement terms (ik:Door, ik:doors,
 # ik:endpointName, ik:matchKind, ik:RewriteRule, …), which ikigai-vocab defines from
