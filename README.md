@@ -260,7 +260,7 @@ pair alone, and builds the crate without the default `full` feature, so nothing 
 compiled:
 
 ```toml
-ikigai-sexpr = { version = "0.1", default-features = false }
+ikigai-sexpr = { version = "0.2", default-features = false }
 ```
 ```rust,ignore
 let space = ikigai_sexpr::arrangement_space(); // urn:sexpr:arrangement-to-rdf / -from-rdf
