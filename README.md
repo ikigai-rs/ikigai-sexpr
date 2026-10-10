@@ -273,6 +273,10 @@ pure compilers and the arrangement surface. Measured on a wasm32 consumer (`opt-
 LTO): a kernel mounting `space()` is 391 KB gzip, mounting `arrangement_space()` 241 KB,
 and an empty kernel 159 KB.
 
+Each space names itself, since nothing is read while it is built: `space()` is
+`urn:iki:space:sexpr` (`ikigai_sexpr::SPACE_ID`), and `arrangement_space()`, which holds two of
+its six doors, is `urn:iki:space:sexpr:arrangement` (`ikigai_sexpr::ARRANGEMENT_SPACE_ID`).
+
 `Sexpr`, the reader/printer, and the compilers are wasm-clean; the endpoints and the
 arrangement surface are the only parts that touch `ikigai-core`.
 

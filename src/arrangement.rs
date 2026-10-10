@@ -97,8 +97,8 @@ use std::fmt;
 
 use async_trait::async_trait;
 use ikigai_core::{
-    ArgSpec, DeclarationBound, DeclarationError, Description, Door, Endpoint, EndpointSpace,
-    Error as CoreError, Exact, Invocation, Iri, MatchKind, ReprType, Representation,
+    space_iri, ArgSpec, DeclarationBound, DeclarationError, Description, Door, Endpoint,
+    EndpointSpace, Error as CoreError, Exact, Invocation, Iri, MatchKind, ReprType, Representation,
     Result as CoreResult, RuleKind, SpaceKind, Topology, TopologyRule, UriTemplate, Verb,
     DEFAULT_MAX_HOPS, MAX_DECLARATION_DEPTH, MAX_DECLARATION_NODES, MAX_DECLARATION_TEXT,
 };
@@ -154,7 +154,15 @@ const SKOLEM_PREFIX: &str = "urn:ikigai:space:_:";
 /// let plan = select_transreptor(space.as_ref(), MEDIA_ARRANGEMENT, MEDIA_TURTLE).unwrap();
 /// assert_eq!(plan[0].endpoint, "urn:sexpr:arrangement-to-rdf");
 /// assert!(plan[0].lossless);
+/// assert_eq!(
+///     space.id().map(|id| id.as_str().to_string()).as_deref(),
+///     Some(ikigai_sexpr::ARRANGEMENT_SPACE_ID)
+/// );
 /// ```
+///
+/// The space names itself [`ARRANGEMENT_SPACE_ID`] (`urn:iki:space:sexpr:arrangement`), never
+/// `urn:iki:space:sexpr`: a name says which doors a space holds, and this one holds two of the
+/// six that [`space`](crate::space) holds.
 pub fn arrangement_space() -> EndpointSpace {
     EndpointSpace::new()
         .bind(Exact::new("urn:sexpr:arrangement-to-rdf"), ArrangementToRdf)
@@ -162,7 +170,12 @@ pub fn arrangement_space() -> EndpointSpace {
             Exact::new("urn:sexpr:arrangement-from-rdf"),
             ArrangementFromRdf,
         )
+        // Last: binding a door after naming would drop the name (core 0.1.89).
+        .named(space_iri("sexpr:arrangement"))
 }
+
+/// The name [`arrangement_space`] claims: `urn:iki:space:sexpr:arrangement`.
+pub const ARRANGEMENT_SPACE_ID: &str = "urn:iki:space:sexpr:arrangement";
 
 /// Why an arrangement was refused: where, and why.
 #[derive(Clone, Debug, PartialEq, Eq)]
