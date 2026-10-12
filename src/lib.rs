@@ -213,9 +213,94 @@ pub type SexprResult<T> = std::result::Result<T, SexprError>;
 /// deeper than any legitimately authored s-expression.
 pub(crate) const MAX_SEXPR_DEPTH: usize = 512;
 
+/// The crate's SIZE bounds, beside its nesting bound: at most this many s-expression nodes
+/// (every atom and every list, the empty list included) in any datum this crate builds from
+/// request input, and at most [`MAX_SEXPR_TEXT`] bytes of atom text. Both readers of caller
+/// input count in these units, as they produce each node and before they allocate it, and
+/// refuse past either bound with a clear [`SexprError::Parse`] naming it ([`SizeBudget`]).
+///
+/// The reader cannot be made to exceed them by much (its input is at least as long as what it
+/// yields), but the code-graph decoder can: the graph SHARES nodes, a shared node is expanded
+/// at every place it is used, and a few kilobytes of Turtle whose nodes each use the next twice
+/// denote a tree that doubles with every level (ledger #1331: 22 levels, 7.7 KB of Turtle,
+/// decoded to 25 MB in 11 s in a debug build; about 40 levels exhausts a host's memory). Core's
+/// `Topology::from_turtle` bounds a declaration the same way, for the same reason. One pair of
+/// bounds for both sides keeps the codec closed: every datum the reader yields, up to the
+/// bounds, encodes and decodes back, and the decoder yields nothing the reader would refuse.
+///
+/// 2^20 nodes is a few megabytes of source and far past any authored s-expression; at the
+/// bound a datum costs on the order of 100 MB in memory, so it is a ceiling, not a target.
+pub(crate) const MAX_SEXPR_NODES: usize = 1 << 20;
+
+/// The text half of the size bounds: at most this many bytes of symbol and string text (an
+/// integer's text is its fixed-size value, so it counts as a node only), counted at every
+/// place an atom is used. The node bound alone would let one large literal, shared by many
+/// nodes in a code-graph, expand to gigabytes.
+///
+/// 32 MiB, twice core's `MAX_DECLARATION_TEXT`, on purpose: an arrangement is read by this
+/// reader before core measures it, and its text as the reader counts it is core's text plus
+/// the forms' own keywords (`mount`, `limit`, `:id`, …), so an arrangement at core's bound must
+/// fit under this one for core to be the one that refuses it, in core's units
+/// (`tests/arrangement.rs`, `the_reader_counts_exactly_as_core_counts`).
+pub(crate) const MAX_SEXPR_TEXT: usize = 32 << 20;
+
+/// The running size of a datum being built from request input, in the units of
+/// [`MAX_SEXPR_NODES`] and [`MAX_SEXPR_TEXT`]: charged one node at a time, as the node is
+/// produced, so a document is refused once it passes a bound and never after the expansion.
+/// One accounting for the reader and the code-graph decoder, so the two refuse alike.
+pub(crate) struct SizeBudget {
+    nodes: usize,
+    text: usize,
+    /// How the refusal opens: what holds too much (`"s-expression holds"`,
+    /// `"code-graph decodes to"`).
+    subject: &'static str,
+}
+
+impl SizeBudget {
+    pub(crate) fn new(subject: &'static str) -> Self {
+        SizeBudget {
+            nodes: 0,
+            text: 0,
+            subject,
+        }
+    }
+
+    /// Charge one node carrying `text` bytes of atom text (0 for a list or an integer).
+    pub(crate) fn charge(&mut self, text: usize) -> SexprResult<()> {
+        self.nodes = self.nodes.saturating_add(1);
+        self.text = self.text.saturating_add(text);
+        let subject = self.subject;
+        if self.nodes > MAX_SEXPR_NODES {
+            Err(SexprError::Parse(format!(
+                "{subject} more than {MAX_SEXPR_NODES} s-expression nodes (the size limit, \
+                 the same for the reader and the code-graph decoder)"
+            )))
+        } else if self.text > MAX_SEXPR_TEXT {
+            Err(SexprError::Parse(format!(
+                "{subject} more than {MAX_SEXPR_TEXT} bytes of s-expression text (the size \
+                 limit, the same for the reader and the code-graph decoder)"
+            )))
+        } else {
+            Ok(())
+        }
+    }
+}
+
 /// Parse exactly one top-level s-expression from `src`. Whitespace and `;` line comments
 /// are skipped. Errors on an empty input, unbalanced parens, an unterminated string, or
 /// trailing tokens after the first form (use [`parse_all`] for a stream of forms).
+///
+/// Bounded, like every reader of caller input in this crate: refused past 512 nested lists,
+/// past 1,048,576 nodes (every atom and every list), or past 32 MiB of symbol and string
+/// text. [`parse_all`] counts the nodes and text of the whole stream.
+///
+/// ```
+/// use ikigai_sexpr::parse;
+///
+/// let wide = format!("({})", "a ".repeat(1 << 20));
+/// let refused = parse(&wide).unwrap_err().to_string();
+/// assert!(refused.contains("more than 1048576 s-expression nodes"), "{refused}");
+/// ```
 pub fn parse(src: &str) -> SexprResult<Sexpr> {
     let mut r = Reader::new(src);
     r.skip_trivia();
@@ -250,6 +335,8 @@ pub fn parse_all(src: &str) -> SexprResult<Vec<Sexpr>> {
 struct Reader {
     chars: Vec<char>,
     pos: usize,
+    /// Every form read so far, across the whole input ([`MAX_SEXPR_NODES`]).
+    budget: SizeBudget,
 }
 
 impl Reader {
@@ -257,6 +344,7 @@ impl Reader {
         Reader {
             chars: src.chars().collect(),
             pos: 0,
+            budget: SizeBudget::new("s-expression holds"),
         }
     }
 
@@ -305,6 +393,7 @@ impl Reader {
                 "s-expression nests deeper than the reader limit ({MAX_SEXPR_DEPTH})"
             )));
         }
+        self.budget.charge(0)?;
         self.pos += 1; // consume '('
         let mut items = Vec::new();
         loop {
@@ -339,6 +428,7 @@ impl Reader {
                 None => return Err(SexprError::Parse("unterminated string literal".to_string())),
                 Some('"') => {
                     self.pos += 1; // consume closing '"'
+                    self.budget.charge(out.len())?;
                     return Ok(Sexpr::Str(out));
                 }
                 Some('\\') => {
@@ -378,8 +468,10 @@ impl Reader {
         }
         let token: String = self.chars[start..self.pos].iter().collect();
         if let Ok(n) = token.parse::<i64>() {
+            self.budget.charge(0)?;
             Ok(Sexpr::Int(n))
         } else {
+            self.budget.charge(token.len())?;
             Ok(Sexpr::Symbol(token))
         }
     }

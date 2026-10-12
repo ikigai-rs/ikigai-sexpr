@@ -9,8 +9,8 @@ use oxrdfio::{RdfFormat, RdfParser};
 use sha2::{Digest, Sha256};
 
 use crate::{
-    render_string_literal, Sexpr, SexprError, SexprResult, MAX_SEXPR_DEPTH, RDF_NS, SX_NS,
-    XSD_STRING,
+    render_string_literal, Sexpr, SexprError, SexprResult, SizeBudget, MAX_SEXPR_DEPTH, RDF_NS,
+    SX_NS, XSD_STRING,
 };
 
 /// Datatype IRI marking a literal as a `Symbol` (distinct from `xsd:string`, so a symbol
@@ -197,6 +197,31 @@ fn to_hex(bytes: &[u8]) -> String {
 /// `xsd:integer`→Int). Every malformed/ill-typed input is a clear [`SexprError::Parse`] —
 /// never a panic. Other triples in the document are ignored, so a code-graph can be embedded
 /// in a larger graph.
+///
+/// Bounded exactly as [`parse`](crate::parse) is: refused past 512 nested lists, past
+/// 1,048,576 decoded nodes, or past 32 MiB of decoded symbol and string text. A node the graph
+/// shares is decoded, and counted, at every place it is used, so a small graph that denotes a
+/// huge tree is refused as it expands, not after:
+///
+/// ```
+/// use ikigai_sexpr::rdf_to_sexpr;
+///
+/// const RDF: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#";
+/// // `n_i` is the list `(n_{i+1} n_{i+1})`, one shared node used twice: 64 levels of it is
+/// // about 10 KB of Turtle denoting a tree of 2^64 leaves.
+/// let mut ttl = "<urn:sexpr:document> <https://ikigai-rs.dev/ns/sexpr#root> <urn:sexpr:n0> .\n"
+///     .to_string();
+/// for i in 0..64 {
+///     ttl += &format!(
+///         "<urn:sexpr:n{i}> <{RDF}first> <urn:sexpr:n{j}> ; <{RDF}rest> <urn:sexpr:m{i}> .\n\
+///          <urn:sexpr:m{i}> <{RDF}first> <urn:sexpr:n{j}> ; <{RDF}rest> <{RDF}nil> .\n",
+///         j = i + 1
+///     );
+/// }
+/// ttl += &format!("<urn:sexpr:n64> <{RDF}first> \"x\" ; <{RDF}rest> <{RDF}nil> .\n");
+/// let refused = rdf_to_sexpr(&ttl).unwrap_err().to_string();
+/// assert!(refused.contains("code-graph decodes to more than 1048576 s-expression nodes"));
+/// ```
 pub fn rdf_to_sexpr(turtle: &str) -> SexprResult<Sexpr> {
     let mut firsts: HashMap<String, RdfTerm> = HashMap::new();
     let mut rests: HashMap<String, RdfTerm> = HashMap::new();
@@ -228,7 +253,8 @@ pub fn rdf_to_sexpr(turtle: &str) -> SexprResult<Sexpr> {
             "no `<{SEXPR_DOCUMENT}> sx:root …` triple — not an s-expression code-graph"
         ))
     })?;
-    decode_term(&root, &firsts, &rests, 0)
+    let mut budget = SizeBudget::new("code-graph decodes to");
+    decode_term(&root, &firsts, &rests, 0, &mut budget)
 }
 
 /// A minimal owned RDF term — the only two shapes a code-graph uses in first/rest/root
@@ -255,21 +281,39 @@ fn term_of(term: &Term) -> SexprResult<RdfTerm> {
 /// Decode a term in root/first position: a literal → an atom; `rdf:nil` → the empty list; a
 /// cons-node IRI → the list it heads. `depth` counts the lists that enclose `term`, as the
 /// reader counts them, so a list is refused exactly where [`parse`](crate::parse) would refuse
-/// it ([`MAX_SEXPR_DEPTH`]), and before the recursion that would overflow the stack.
+/// it ([`MAX_SEXPR_DEPTH`]), and before the recursion that would overflow the stack. Every
+/// node is charged to `budget` before it is built, in the reader's units (a list or an
+/// integer is a node; a symbol or string is a node and its bytes), so a shared node is
+/// counted at every place it is used and the decode is refused as the tree grows past the
+/// crate's size bounds, never after.
 fn decode_term(
     term: &RdfTerm,
     firsts: &HashMap<String, RdfTerm>,
     rests: &HashMap<String, RdfTerm>,
     depth: usize,
+    budget: &mut SizeBudget,
 ) -> SexprResult<Sexpr> {
     match term {
-        RdfTerm::Literal { value, datatype } => decode_atom(value, datatype),
+        RdfTerm::Literal { value, datatype } => {
+            budget.charge(if datatype == XSD_INTEGER {
+                0
+            } else {
+                value.len()
+            })?;
+            decode_atom(value, datatype)
+        }
         RdfTerm::Iri(_) if depth >= MAX_SEXPR_DEPTH => Err(SexprError::Parse(format!(
             "code-graph nests deeper than {MAX_SEXPR_DEPTH} lists (the decode limit, the \
              same as the reader's)"
         ))),
-        RdfTerm::Iri(iri) if iri == RDF_NIL => Ok(Sexpr::List(Vec::new())),
-        RdfTerm::Iri(iri) => decode_list(iri, firsts, rests, depth),
+        RdfTerm::Iri(iri) => {
+            budget.charge(0)?;
+            if iri == RDF_NIL {
+                Ok(Sexpr::List(Vec::new()))
+            } else {
+                decode_list(iri, firsts, rests, depth, budget)
+            }
+        }
     }
 }
 
@@ -297,6 +341,7 @@ fn decode_list(
     firsts: &HashMap<String, RdfTerm>,
     rests: &HashMap<String, RdfTerm>,
     depth: usize,
+    budget: &mut SizeBudget,
 ) -> SexprResult<Sexpr> {
     let mut items = Vec::new();
     let mut visited: HashSet<String> = HashSet::new();
@@ -316,7 +361,7 @@ fn decode_list(
         let rest = rests
             .get(&cur)
             .ok_or_else(|| SexprError::Parse(format!("cons node <{cur}> has no rdf:rest")))?;
-        items.push(decode_term(first, firsts, rests, depth + 1)?);
+        items.push(decode_term(first, firsts, rests, depth + 1, budget)?);
         match rest {
             RdfTerm::Iri(next) => cur = next.clone(),
             RdfTerm::Literal { .. } => {
