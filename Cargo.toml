@@ -89,3 +89,10 @@ oxigraph = { version = "0.5", default-features = false }
 [[test]]
 name = "conformance"
 required-features = ["full"]
+
+# The code-graph encoder hashes every node of a datum (sha2), and `tests/dag.rs` encodes one at
+# the crate's size bound (2^20 nodes): measured 38 s in an unoptimized debug build, 13 s with
+# sha2 optimized (the rest is digest code instantiated in this crate, which stays at the
+# profile's level). A dev/test-only setting; a dependency's profile never reaches consumers.
+[profile.dev.package.sha2]
+opt-level = 3
