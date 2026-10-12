@@ -982,6 +982,45 @@ mod code_graph {
             "SPARQL found the head symbol"
         );
     }
+
+    /// The exact bytes of one encoding, every node IRI included. A node's IRI is the content
+    /// hash of its subtree, and consumers key on it (signing, caching, sharing across
+    /// documents), so a change to how the hash is computed must never change what it is.
+    #[test]
+    fn the_encoding_is_pinned_byte_for_byte() {
+        let s = parse(r#"(a "s" -1 () ((x y) (x y)) (a))"#).unwrap();
+        assert_eq!(sexpr_to_rdf(&s).unwrap(), PINNED_ENCODING);
+    }
+
+    // Captured from the encoder before ledger #1332 changed how it computes hashes.
+    const PINNED_ENCODING: &str = concat!(
+        "@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .\n",
+        "@prefix sx: <https://ikigai-rs.dev/ns/sexpr#> .\n",
+        "@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\n",
+        "<urn:sexpr:document> sx:root <urn:sexpr:49490f21e8996d3394ccaea5489f65b9c9310dc2bd8f3de0a22755f98508b568> .\n",
+        "<urn:sexpr:05ace506e798158d6a61e0dd9e72b6c9ba2d7200f9d549e858df87445b0d44e1> rdf:first \"a\"^^sx:symbol .\n",
+        "<urn:sexpr:05ace506e798158d6a61e0dd9e72b6c9ba2d7200f9d549e858df87445b0d44e1> rdf:rest rdf:nil .\n",
+        "<urn:sexpr:20be6ff3377d792e83d4ff5272a9c8b5d17496c14707ade441cdc37bfa588141> rdf:first <urn:sexpr:64edf6d7ff46029ada97911cc8cb02f7819d760a59a34ff5a843ea9f4a7e36df> .\n",
+        "<urn:sexpr:20be6ff3377d792e83d4ff5272a9c8b5d17496c14707ade441cdc37bfa588141> rdf:rest rdf:nil .\n",
+        "<urn:sexpr:35d1a69306ddb121450016473d97c414b30264d0c986d96fc50b5c7113ace47b> rdf:first \"s\"^^xsd:string .\n",
+        "<urn:sexpr:35d1a69306ddb121450016473d97c414b30264d0c986d96fc50b5c7113ace47b> rdf:rest <urn:sexpr:49a6935a0c7f401ea4b3df0fd53b81dd1a52d0673e9df90aad090020653e8edf> .\n",
+        "<urn:sexpr:49490f21e8996d3394ccaea5489f65b9c9310dc2bd8f3de0a22755f98508b568> rdf:first \"a\"^^sx:symbol .\n",
+        "<urn:sexpr:49490f21e8996d3394ccaea5489f65b9c9310dc2bd8f3de0a22755f98508b568> rdf:rest <urn:sexpr:35d1a69306ddb121450016473d97c414b30264d0c986d96fc50b5c7113ace47b> .\n",
+        "<urn:sexpr:49a6935a0c7f401ea4b3df0fd53b81dd1a52d0673e9df90aad090020653e8edf> rdf:first \"-1\"^^xsd:integer .\n",
+        "<urn:sexpr:49a6935a0c7f401ea4b3df0fd53b81dd1a52d0673e9df90aad090020653e8edf> rdf:rest <urn:sexpr:ede9be1efa7697ffc4c9d26234c8b0ea2a36b58ef3f993f5b362cf52ac95e714> .\n",
+        "<urn:sexpr:4c9f63024accf11930cdc2a91a04ab11fb491be52643624032f503c462033c73> rdf:first <urn:sexpr:5c59a841e41195d67c721fc2bb585710128bb78a96c7fd425a451494e45ffe71> .\n",
+        "<urn:sexpr:4c9f63024accf11930cdc2a91a04ab11fb491be52643624032f503c462033c73> rdf:rest <urn:sexpr:e2abc4795fd45551ceac5f6eb765cd53723e5ba4b0f6172893d1b8a71a4755ac> .\n",
+        "<urn:sexpr:5c59a841e41195d67c721fc2bb585710128bb78a96c7fd425a451494e45ffe71> rdf:first <urn:sexpr:64edf6d7ff46029ada97911cc8cb02f7819d760a59a34ff5a843ea9f4a7e36df> .\n",
+        "<urn:sexpr:5c59a841e41195d67c721fc2bb585710128bb78a96c7fd425a451494e45ffe71> rdf:rest <urn:sexpr:20be6ff3377d792e83d4ff5272a9c8b5d17496c14707ade441cdc37bfa588141> .\n",
+        "<urn:sexpr:64edf6d7ff46029ada97911cc8cb02f7819d760a59a34ff5a843ea9f4a7e36df> rdf:first \"x\"^^sx:symbol .\n",
+        "<urn:sexpr:64edf6d7ff46029ada97911cc8cb02f7819d760a59a34ff5a843ea9f4a7e36df> rdf:rest <urn:sexpr:658331eeb2922fd7cae4025d8017eead873748e5f3357c48c266dc8c7979a6cf> .\n",
+        "<urn:sexpr:658331eeb2922fd7cae4025d8017eead873748e5f3357c48c266dc8c7979a6cf> rdf:first \"y\"^^sx:symbol .\n",
+        "<urn:sexpr:658331eeb2922fd7cae4025d8017eead873748e5f3357c48c266dc8c7979a6cf> rdf:rest rdf:nil .\n",
+        "<urn:sexpr:e2abc4795fd45551ceac5f6eb765cd53723e5ba4b0f6172893d1b8a71a4755ac> rdf:first <urn:sexpr:05ace506e798158d6a61e0dd9e72b6c9ba2d7200f9d549e858df87445b0d44e1> .\n",
+        "<urn:sexpr:e2abc4795fd45551ceac5f6eb765cd53723e5ba4b0f6172893d1b8a71a4755ac> rdf:rest rdf:nil .\n",
+        "<urn:sexpr:ede9be1efa7697ffc4c9d26234c8b0ea2a36b58ef3f993f5b362cf52ac95e714> rdf:first rdf:nil .\n",
+        "<urn:sexpr:ede9be1efa7697ffc4c9d26234c8b0ea2a36b58ef3f993f5b362cf52ac95e714> rdf:rest <urn:sexpr:4c9f63024accf11930cdc2a91a04ab11fb491be52643624032f503c462033c73> .\n",
+    );
 }
 
 // ---- slice 3c.2: the to-rdf / from-rdf endpoints, end-to-end through the kernel ----
