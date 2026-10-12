@@ -114,7 +114,10 @@ fn probe(depth: usize) -> (Duration, usize) {
     let at = stdout
         .find("\nOUTCOME ")
         .unwrap_or_else(|| panic!("the depth-{depth} encoder probe reported nothing: {stdout}"));
-    let line = stdout[at + "\nOUTCOME ".len()..].lines().next().unwrap_or("");
+    let line = stdout[at + "\nOUTCOME ".len()..]
+        .lines()
+        .next()
+        .unwrap_or("");
     let mut words = line.splitn(3, ' ');
     let status = words.next().unwrap_or("");
     let micros: u64 = words.next().unwrap_or("").parse().unwrap();

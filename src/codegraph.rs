@@ -54,10 +54,17 @@ pub(crate) const XSD_INTEGER: &str = "http://www.w3.org/2001/XMLSchema#integer";
 /// (statements are content-addressed and sorted). Equal sub-lists collapse to one shared,
 /// content-addressed cons node. Round-trips exactly through [`rdf_to_sexpr`]. Total — never
 /// fails for a valid datum (the `Result` mirrors the sibling compilers' signature).
+///
+/// Linear in the datum: every node is hashed once, in one post-order pass (`ListHashes`),
+/// and the emit walk reuses those hashes at every level, so a list nested `d` lists deep costs
+/// the same as the list alone (ledger #1332).
 pub fn sexpr_to_rdf(sexpr: &Sexpr) -> SexprResult<String> {
     let mut stmts: Vec<String> = Vec::new();
-    let mut seen: HashSet<String> = HashSet::new();
-    let root = emit_node(sexpr, &mut stmts, &mut seen);
+    let mut seen: HashSet<[u8; 32]> = HashSet::new();
+    let root = match sexpr {
+        Sexpr::List(items) => emit_list(items, &ListHashes::of(items), &mut stmts, &mut seen),
+        atom => atom_term(atom),
+    };
 
     // Content-address ⇒ traversal order is irrelevant; sort for byte-stable output.
     stmts.sort();
@@ -77,72 +84,82 @@ pub fn sexpr_to_rdf(sexpr: &Sexpr) -> SexprResult<String> {
 /// The XSD namespace (for the `@prefix xsd:` line). `XSD_STRING`/`XSD_INTEGER` live under it.
 const XSD_STRING_NS: &str = "http://www.w3.org/2001/XMLSchema#";
 
-/// Emit the Turtle term denoting `sexpr` — a typed literal for an atom, or a node IRI /
-/// `rdf:nil` for a list — appending each *new* cons cell's two statements to `stmts`. A cons
-/// node already in `seen` is not re-emitted (that is where structural sharing shows up).
-fn emit_node(sexpr: &Sexpr, stmts: &mut Vec<String>, seen: &mut HashSet<String>) -> String {
-    match sexpr {
+/// The content hashes of one list, computed once and kept beside the datum for the emit walk:
+/// `suffix[i]` hashes the cons chain `items[i..]` (`suffix[len]` is the `nil` marker), and
+/// `lists` holds the same for each element that is itself a list, in order (an atom costs one
+/// hash and nothing more).
+///
+/// The hash is deterministic and domain-separated, a pure function of the subtree, so equal
+/// subtrees hash equally and share a node:
+/// - an atom is `H(tag ‖ len as u64 LE ‖ payload)`, with tag `0x01` for a symbol, `0x02` for
+///   a string and `0x03` for an integer (payload its `i64` LE bytes); the length prefix
+///   removes any ambiguity between differently split payloads;
+/// - the empty chain is `H(0x00)`, and a cons cell is `H(0x04 ‖ hash(first) ‖ hash(rest))`, so
+///   a list's hash is its first suffix's.
+///
+/// No time or randomness: reproducible, and a node's IRI is `urn:sexpr:` and this hash in hex.
+struct ListHashes {
+    suffix: Vec<[u8; 32]>,
+    lists: Vec<ListHashes>,
+}
+
+impl ListHashes {
+    /// Hash `items` and every list inside it, post-order: each element's hash is computed
+    /// once, before the suffixes that fold it in. The fold along the cons tail is a reverse
+    /// loop, never a recursion per element, so a long flat list is stack-safe; recursion is
+    /// into nested lists only, bounded by nesting depth (the reader caps it).
+    fn of(items: &[Sexpr]) -> ListHashes {
+        let mut lists: Vec<ListHashes> = Vec::new();
+        let mut firsts: Vec<[u8; 32]> = Vec::with_capacity(items.len());
+        for item in items {
+            match item {
+                Sexpr::List(sub) => {
+                    let hashes = ListHashes::of(sub);
+                    firsts.push(hashes.suffix[0]);
+                    lists.push(hashes);
+                }
+                atom => firsts.push(atom_hash(atom)),
+            }
+        }
+        let mut suffix = vec![[0u8; 32]; items.len() + 1];
+        suffix[items.len()] = {
+            let mut h = Sha256::new();
+            h.update([0x00]); // nil marker
+            h.finalize().into()
+        };
+        for i in (0..items.len()).rev() {
+            let mut h = Sha256::new();
+            h.update([0x04]); // cons marker
+            h.update(firsts[i]);
+            h.update(suffix[i + 1]);
+            suffix[i] = h.finalize().into();
+        }
+        ListHashes { suffix, lists }
+    }
+}
+
+/// The typed Turtle literal for an atom. Never called with a list.
+fn atom_term(atom: &Sexpr) -> String {
+    match atom {
         Sexpr::Symbol(s) => typed_literal(s, "sx:symbol"),
         Sexpr::Str(s) => typed_literal(s, "xsd:string"),
         Sexpr::Int(n) => format!("\"{n}\"^^xsd:integer"),
-        Sexpr::List(items) => emit_list(items, stmts, seen),
+        Sexpr::List(_) => unreachable!("atom_term is called with atoms only"),
     }
 }
 
-/// Emit the cons chain for a list slice, returning its node term (`<urn:sexpr:…>` or, for the
-/// empty list, `rdf:nil`). Content-addressed: each suffix's IRI is the hex of its subtree hash.
-///
-/// The cons chain is walked ITERATIVELY along the tail (never recursing per element), so a
-/// long flat list `(a a a …)` cannot overflow the stack. `emit_node` still recurses into each
-/// element's own subtree, but that is bounded by nesting depth (the reader caps it), not list
-/// length. The per-suffix hashes are precomputed bottom-up in one pass ([`suffix_hashes`]),
-/// so the whole walk is linear rather than re-hashing each suffix.
-fn emit_list(items: &[Sexpr], stmts: &mut Vec<String>, seen: &mut HashSet<String>) -> String {
-    if items.is_empty() {
-        return "rdf:nil".to_string();
-    }
-    let hashes = suffix_hashes(items);
-    let node_term = |i: usize| format!("<{SEXPR_NODE_PREFIX}{}>", to_hex(&hashes[i]));
-    for i in 0..items.len() {
-        let iri = format!("{SEXPR_NODE_PREFIX}{}", to_hex(&hashes[i]));
-        // A suffix already in `seen` means it — and its whole remaining tail — was emitted
-        // earlier (structural sharing); stop rather than re-walking.
-        if !seen.insert(iri) {
-            break;
-        }
-        let node = node_term(i);
-        let first = emit_node(&items[i], stmts, seen);
-        let rest = if i + 1 == items.len() {
-            "rdf:nil".to_string()
-        } else {
-            node_term(i + 1)
-        };
-        stmts.push(format!("{node} rdf:first {first} ."));
-        stmts.push(format!("{node} rdf:rest {rest} ."));
-    }
-    node_term(0)
-}
-
-/// A typed Turtle literal `"escaped-value"^^dt` — reusing [`render_string_literal`] so the
-/// lexical form is escaped, never interpolated (a symbol/string can't break out of the graph).
-fn typed_literal(value: &str, datatype_qname: &str) -> String {
-    format!("{}^^{datatype_qname}", render_string_literal(value))
-}
-
-/// The deterministic, domain-separated content hash of a datum's subtree (bottom-up). Equal
-/// subtrees hash equally ⇒ shared, content-addressed nodes. No time/randomness — reproducible.
-fn content_hash(sexpr: &Sexpr) -> [u8; 32] {
-    match sexpr {
-        Sexpr::Symbol(s) => atom_hash(0x01, s.as_bytes()),
-        Sexpr::Str(s) => atom_hash(0x02, s.as_bytes()),
-        Sexpr::Int(n) => atom_hash(0x03, &n.to_le_bytes()),
-        Sexpr::List(items) => list_hash(items),
+/// The content hash of an atom (see [`ListHashes`] for the scheme). Never called with a list.
+fn atom_hash(atom: &Sexpr) -> [u8; 32] {
+    match atom {
+        Sexpr::Symbol(s) => tagged_hash(0x01, s.as_bytes()),
+        Sexpr::Str(s) => tagged_hash(0x02, s.as_bytes()),
+        Sexpr::Int(n) => tagged_hash(0x03, &n.to_le_bytes()),
+        Sexpr::List(_) => unreachable!("atom_hash is called with atoms only"),
     }
 }
 
-/// Hash of a single atom: a kind tag, a length prefix, then the payload bytes (the length
-/// prefix removes any concatenation ambiguity between differently-split payloads).
-fn atom_hash(tag: u8, payload: &[u8]) -> [u8; 32] {
+/// `H(tag ‖ len as u64 LE ‖ payload)`.
+fn tagged_hash(tag: u8, payload: &[u8]) -> [u8; 32] {
     let mut h = Sha256::new();
     h.update([tag]);
     h.update((payload.len() as u64).to_le_bytes());
@@ -150,34 +167,58 @@ fn atom_hash(tag: u8, payload: &[u8]) -> [u8; 32] {
     h.finalize().into()
 }
 
-/// Hash of a cons chain starting at `items`: the empty chain is the `nil` marker; otherwise
-/// `H(0x04 ‖ hash(first) ‖ hash(rest))` — so the whole subtree determines the node IRI. The
-/// fold over the tail is iterative (see [`suffix_hashes`]), so a long flat list never recurses
-/// per element.
-fn list_hash(items: &[Sexpr]) -> [u8; 32] {
-    suffix_hashes(items)[0]
+/// The `<urn:sexpr:…>` term of a cons cell with this hash.
+fn node_term(hash: &[u8; 32]) -> String {
+    format!("<{SEXPR_NODE_PREFIX}{}>", to_hex(hash))
 }
 
-/// The content hash of every suffix of `items`, bottom-up: `out[i]` hashes `items[i..]` and
-/// `out[len]` is the `nil` marker. Computed in a single reverse pass — no recursion along the
-/// cons tail — so a long flat list is linear and stack-safe. Each `content_hash` still recurses
-/// into an element's own subtree, but that is bounded by nesting depth, not list length.
-fn suffix_hashes(items: &[Sexpr]) -> Vec<[u8; 32]> {
-    let mut out = vec![[0u8; 32]; items.len() + 1];
-    out[items.len()] = {
-        let mut h = Sha256::new();
-        h.update([0x00]); // nil marker
-        h.finalize().into()
-    };
-    for i in (0..items.len()).rev() {
-        let fh = content_hash(&items[i]);
-        let mut h = Sha256::new();
-        h.update([0x04]); // cons marker
-        h.update(fh);
-        h.update(out[i + 1]);
-        out[i] = h.finalize().into();
+/// Emit the cons chain for a list, returning its node term (`<urn:sexpr:…>` or, for the empty
+/// list, `rdf:nil`) and appending each *new* cons cell's two statements to `stmts`. A cell
+/// already in `seen` is not re-emitted: that is where structural sharing shows up, and since
+/// a cell's hash covers its whole tail, the rest of the chain was emitted with it.
+///
+/// The chain is walked ITERATIVELY along the tail (never recursing per element), so a long flat
+/// list `(a a a …)` cannot overflow the stack; the walk recurses into an element only when it
+/// is a list, bounded by nesting depth. Every hash comes from `hashes`, computed once.
+fn emit_list(
+    items: &[Sexpr],
+    hashes: &ListHashes,
+    stmts: &mut Vec<String>,
+    seen: &mut HashSet<[u8; 32]>,
+) -> String {
+    if items.is_empty() {
+        return "rdf:nil".to_string();
     }
-    out
+    let mut sub_hashes = hashes.lists.iter();
+    for (i, item) in items.iter().enumerate() {
+        if !seen.insert(hashes.suffix[i]) {
+            break;
+        }
+        let node = node_term(&hashes.suffix[i]);
+        let first = match item {
+            Sexpr::List(sub) => {
+                let sub_hashes = sub_hashes
+                    .next()
+                    .expect("ListHashes::of hashed every list element, in order");
+                emit_list(sub, sub_hashes, stmts, seen)
+            }
+            atom => atom_term(atom),
+        };
+        let rest = if i + 1 == items.len() {
+            "rdf:nil".to_string()
+        } else {
+            node_term(&hashes.suffix[i + 1])
+        };
+        stmts.push(format!("{node} rdf:first {first} ."));
+        stmts.push(format!("{node} rdf:rest {rest} ."));
+    }
+    node_term(&hashes.suffix[0])
+}
+
+/// A typed Turtle literal `"escaped-value"^^dt` — reusing [`render_string_literal`] so the
+/// lexical form is escaped, never interpolated (a symbol/string can't break out of the graph).
+fn typed_literal(value: &str, datatype_qname: &str) -> String {
+    format!("{}^^{datatype_qname}", render_string_literal(value))
 }
 
 /// Lowercase hex of a byte slice (no dependency, deterministic).
@@ -372,4 +413,97 @@ fn decode_list(
         }
     }
     Ok(Sexpr::List(items))
+}
+
+/// The encoder as it was before ledger #1332, kept as a TEST ORACLE: it recomputes a list's
+/// hashes at every level the list is nested in (cost nodes x depth), and the encoder above
+/// must answer byte for byte what it answers. Test-only; never compiled into the crate.
+#[cfg(test)]
+pub(crate) mod reference {
+    use super::*;
+
+    pub(crate) fn sexpr_to_rdf(sexpr: &Sexpr) -> String {
+        let mut stmts: Vec<String> = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
+        let root = emit_node(sexpr, &mut stmts, &mut seen);
+        stmts.sort();
+        let mut out = String::new();
+        out.push_str(&format!("@prefix rdf: <{RDF_NS}> .\n"));
+        out.push_str(&format!("@prefix sx: <{SX_NS}> .\n"));
+        out.push_str(&format!("@prefix xsd: <{XSD_STRING_NS}> .\n"));
+        out.push_str(&format!("<{SEXPR_DOCUMENT}> sx:root {root} .\n"));
+        for s in &stmts {
+            out.push_str(s);
+            out.push('\n');
+        }
+        out
+    }
+
+    fn emit_node(sexpr: &Sexpr, stmts: &mut Vec<String>, seen: &mut HashSet<String>) -> String {
+        match sexpr {
+            Sexpr::Symbol(s) => typed_literal(s, "sx:symbol"),
+            Sexpr::Str(s) => typed_literal(s, "xsd:string"),
+            Sexpr::Int(n) => format!("\"{n}\"^^xsd:integer"),
+            Sexpr::List(items) => emit_list(items, stmts, seen),
+        }
+    }
+
+    fn emit_list(items: &[Sexpr], stmts: &mut Vec<String>, seen: &mut HashSet<String>) -> String {
+        if items.is_empty() {
+            return "rdf:nil".to_string();
+        }
+        let hashes = suffix_hashes(items);
+        let node_term = |i: usize| format!("<{SEXPR_NODE_PREFIX}{}>", to_hex(&hashes[i]));
+        for i in 0..items.len() {
+            let iri = format!("{SEXPR_NODE_PREFIX}{}", to_hex(&hashes[i]));
+            if !seen.insert(iri) {
+                break;
+            }
+            let node = node_term(i);
+            let first = emit_node(&items[i], stmts, seen);
+            let rest = if i + 1 == items.len() {
+                "rdf:nil".to_string()
+            } else {
+                node_term(i + 1)
+            };
+            stmts.push(format!("{node} rdf:first {first} ."));
+            stmts.push(format!("{node} rdf:rest {rest} ."));
+        }
+        node_term(0)
+    }
+
+    fn content_hash(sexpr: &Sexpr) -> [u8; 32] {
+        match sexpr {
+            Sexpr::Symbol(s) => atom_hash(0x01, s.as_bytes()),
+            Sexpr::Str(s) => atom_hash(0x02, s.as_bytes()),
+            Sexpr::Int(n) => atom_hash(0x03, &n.to_le_bytes()),
+            Sexpr::List(items) => suffix_hashes(items)[0],
+        }
+    }
+
+    fn atom_hash(tag: u8, payload: &[u8]) -> [u8; 32] {
+        let mut h = Sha256::new();
+        h.update([tag]);
+        h.update((payload.len() as u64).to_le_bytes());
+        h.update(payload);
+        h.finalize().into()
+    }
+
+    fn suffix_hashes(items: &[Sexpr]) -> Vec<[u8; 32]> {
+        let mut out = vec![[0u8; 32]; items.len() + 1];
+        out[items.len()] = {
+            let mut h = Sha256::new();
+            h.update([0x00]);
+            h.finalize().into()
+        };
+        for i in (0..items.len()).rev() {
+            let fh = content_hash(&items[i]);
+            let mut h = Sha256::new();
+            h.update([0x04]);
+            h.update(fh);
+            h.update(out[i + 1]);
+            out[i] = h.finalize().into();
+        }
+        out
+    }
 }

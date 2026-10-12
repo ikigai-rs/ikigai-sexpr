@@ -992,6 +992,93 @@ mod code_graph {
         assert_eq!(sexpr_to_rdf(&s).unwrap(), PINNED_ENCODING);
     }
 
+    /// The encoder answers byte for byte what the encoder before ledger #1332 answered (kept
+    /// as `codegraph::reference`), over hand-picked shapes and a few thousand generated ones:
+    /// every atom kind, empty lists, sharing within and across levels, long and deep lists.
+    #[test]
+    fn the_encoder_answers_exactly_what_the_rehashing_encoder_answered() {
+        use crate::codegraph::reference;
+        let wrap = |depth: usize, inner: Sexpr| (0..depth).fold(inner, |d, _| Sexpr::List(vec![d]));
+        let mut corpus = vec![
+            Sexpr::Symbol("select".into()),
+            Sexpr::Str("hello \"world\"\n\tπ".into()),
+            Sexpr::Str(String::new()),
+            Sexpr::Int(0),
+            Sexpr::Int(i64::MIN),
+            Sexpr::Int(i64::MAX),
+            Sexpr::List(Vec::new()),
+            parse("(())").unwrap(),
+            parse("(() () ())").unwrap(),
+            parse("((x y) (x y))").unwrap(),
+            parse("((x y) y)").unwrap(),
+            parse("(y (x y))").unwrap(),
+            parse(r#"(a "a" 1 (a "a" 1) ((a "a" 1)))"#).unwrap(),
+            parse("(select (?s ?p ?o) (where (?s ?p ?o)) (limit 10))").unwrap(),
+            wrap(511, parse("(a b c)").unwrap()),
+            Sexpr::List((0..2000).map(|i| Sexpr::Int(i % 7)).collect()),
+        ];
+        // A deterministic generator (an LCG): trees up to 6 deep and 6 wide, drawing atoms from
+        // a small alphabet and reusing earlier subtrees, so sharing is common.
+        let mut state: u64 = 0x1332;
+        let mut next = move |n: u64| {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (state >> 33) % n
+        };
+        let mut pool: Vec<Sexpr> = Vec::new();
+        fn generate(
+            depth: usize,
+            next: &mut dyn FnMut(u64) -> u64,
+            pool: &mut Vec<Sexpr>,
+        ) -> Sexpr {
+            let made = match next(if depth == 0 { 4 } else { 6 }) {
+                0 => Sexpr::Symbol(["a", "b", "?s"][next(3) as usize].into()),
+                1 => Sexpr::Str(["a", "", "b c"][next(3) as usize].into()),
+                2 => Sexpr::Int(next(3) as i64 - 1),
+                3 if !pool.is_empty() => pool[next(pool.len() as u64) as usize].clone(),
+                3 => Sexpr::List(Vec::new()),
+                _ => {
+                    let width = next(7) as usize;
+                    Sexpr::List(
+                        (0..width)
+                            .map(|_| generate(depth - 1, next, pool))
+                            .collect(),
+                    )
+                }
+            };
+            if pool.len() < 64 {
+                pool.push(made.clone());
+            }
+            made
+        }
+        for _ in 0..3000 {
+            corpus.push(generate(6, &mut next, &mut pool));
+        }
+        let mut shared = 0;
+        for s in &corpus {
+            let ttl = sexpr_to_rdf(s).unwrap();
+            assert_eq!(ttl, reference::sexpr_to_rdf(s), "for {s:?}");
+            // Count the data that exercises sharing: fewer cells than list elements.
+            let cells = ttl.matches(" rdf:first ").count();
+            if cells < count_cells(s) {
+                shared += 1;
+            }
+        }
+        assert!(
+            shared > 100,
+            "the corpus exercises sharing ({shared} data share a cell)"
+        );
+    }
+
+    /// The cons cells a datum has as a tree (one per list element), before any sharing.
+    fn count_cells(s: &Sexpr) -> usize {
+        match s {
+            Sexpr::List(items) => items.len() + items.iter().map(count_cells).sum::<usize>(),
+            _ => 0,
+        }
+    }
+
     // Captured from the encoder before ledger #1332 changed how it computes hashes.
     const PINNED_ENCODING: &str = concat!(
         "@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .\n",
