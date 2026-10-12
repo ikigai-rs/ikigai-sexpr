@@ -8,7 +8,10 @@ use oxrdf::{NamedOrBlankNode, Term};
 use oxrdfio::{RdfFormat, RdfParser};
 use sha2::{Digest, Sha256};
 
-use crate::{render_string_literal, Sexpr, SexprError, SexprResult, RDF_NS, SX_NS, XSD_STRING};
+use crate::{
+    render_string_literal, Sexpr, SexprError, SexprResult, MAX_SEXPR_DEPTH, RDF_NS, SX_NS,
+    XSD_STRING,
+};
 
 /// Datatype IRI marking a literal as a `Symbol` (distinct from `xsd:string`, so a symbol
 /// round-trips as a symbol and never collapses into a string).
@@ -31,10 +34,6 @@ pub(crate) const RDF_REST: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#re
 pub(crate) const RDF_NIL: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#nil";
 /// The XSD `integer` datatype IRI — an `Int` atom's literal type.
 pub(crate) const XSD_INTEGER: &str = "http://www.w3.org/2001/XMLSchema#integer";
-
-/// A guard against unbounded recursion when decoding a (possibly hostile) graph. The encoder
-/// never nests this deep; a graph that does is rejected rather than overflowing the stack.
-pub(crate) const MAX_DECODE_DEPTH: usize = 4096;
 
 // =====================================================================================
 // Slice 3c.2 — the LOSSLESS code-as-graph codec: `&Sexpr` ⇄ RDF Turtle, kernel-free.
@@ -254,20 +253,21 @@ fn term_of(term: &Term) -> SexprResult<RdfTerm> {
 }
 
 /// Decode a term in root/first position: a literal → an atom; `rdf:nil` → the empty list; a
-/// cons-node IRI → the list it heads.
+/// cons-node IRI → the list it heads. `depth` counts the lists that enclose `term`, as the
+/// reader counts them, so a list is refused exactly where [`parse`](crate::parse) would refuse
+/// it ([`MAX_SEXPR_DEPTH`]), and before the recursion that would overflow the stack.
 fn decode_term(
     term: &RdfTerm,
     firsts: &HashMap<String, RdfTerm>,
     rests: &HashMap<String, RdfTerm>,
     depth: usize,
 ) -> SexprResult<Sexpr> {
-    if depth > MAX_DECODE_DEPTH {
-        return Err(SexprError::Parse(
-            "code-graph nests deeper than the decode limit".to_string(),
-        ));
-    }
     match term {
         RdfTerm::Literal { value, datatype } => decode_atom(value, datatype),
+        RdfTerm::Iri(_) if depth >= MAX_SEXPR_DEPTH => Err(SexprError::Parse(format!(
+            "code-graph nests deeper than {MAX_SEXPR_DEPTH} lists (the decode limit, the \
+             same as the reader's)"
+        ))),
         RdfTerm::Iri(iri) if iri == RDF_NIL => Ok(Sexpr::List(Vec::new())),
         RdfTerm::Iri(iri) => decode_list(iri, firsts, rests, depth),
     }
