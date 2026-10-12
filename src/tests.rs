@@ -893,6 +893,31 @@ mod code_graph {
     }
 
     #[test]
+    fn the_decoder_holds_the_readers_bound_exactly_counting_an_empty_list_too() {
+        // The deepest datum the reader yields: MAX_SEXPR_DEPTH lists, the innermost EMPTY, so
+        // its last level is `rdf:nil` rather than a cons node.
+        let deepest = format!(
+            "{}{}",
+            "(".repeat(MAX_SEXPR_DEPTH),
+            ")".repeat(MAX_SEXPR_DEPTH)
+        );
+        let s = parse(&deepest).expect("the reader takes its own bound");
+        let back = rdf_to_sexpr(&sexpr_to_rdf(&s).unwrap()).expect("and the decoder takes it");
+        assert_eq!(back, s);
+        // One list more is refused by the decoder exactly as the reader refuses it, though
+        // the extra level is `rdf:nil` and not a cons node (ledger #1326).
+        let one_past = Sexpr::List(vec![s]);
+        assert!(parse(&write(&one_past)).is_err());
+        match rdf_to_sexpr(&sexpr_to_rdf(&one_past).unwrap()) {
+            Err(SexprError::Parse(msg)) => assert!(
+                msg.contains(&format!("nests deeper than {MAX_SEXPR_DEPTH} lists")),
+                "{msg}"
+            ),
+            other => panic!("one past the bound must be refused, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn other_triples_in_the_document_are_ignored() {
         // A code-graph embedded in a larger graph still decodes (unrelated triples are skipped).
         let s = parse("(a b)").unwrap();

@@ -195,17 +195,23 @@ pub type SexprResult<T> = std::result::Result<T, SexprError>;
 // The reader — recursive-descent s-expression parser.
 // =====================================================================================
 
-/// A guard against unbounded reader recursion. The reader descends per nesting level (two
-/// heavy frames — `read_form` + `read_list`, each holding a `Vec` and formatting scratch),
-/// so a pathological input like `"(".repeat(1_000_000)` would otherwise overflow the stack
-/// and abort the whole process. Beyond this many open lists the reader returns a clean
-/// [`SexprError::Parse`] instead.
+/// The crate's ONE nesting bound: at most this many lists, one inside another, in any datum
+/// this crate builds from request input. Both readers of caller input hold to it, counting the
+/// same way (the lists that enclose a form): the s-expression [`parse`]r, and the code-graph
+/// decoder `rdf_to_sexpr`, which rebuilds a datum from a graph a caller wrote. Every walk over
+/// the datum afterwards (the compilers, the code-graph encoder's `emit_node`/`content_hash`,
+/// the printer, and `Drop`) recurses once per level, so this bound is what keeps all of them
+/// inside a 2 MiB worker-thread stack in a debug build: a request is served on a tokio worker,
+/// and a stack overflow aborts the whole process, not the request. Past it, a clean
+/// [`SexprError::Parse`].
 ///
-/// Deliberately far below the code-graph decoder's `MAX_DECODE_DEPTH` (the decode-side bound over lighter frames):
-/// this cap must hold on a 2 MiB worker-thread stack in a debug build, and it also bounds the
-/// encoder's nesting-axis recursion (`emit_node`/`content_hash`) on the datum the reader
-/// yields. It is still ~20× deeper than any legitimately authored s-expression.
-const MAX_READ_DEPTH: usize = 512;
+/// A size bound does not bound depth: `"(".repeat(1_000_000)` is a megabyte, and a code-graph
+/// nested 1,800 lists deep is ~100 KB of Turtle, and it aborted `urn:sexpr:from-rdf` on a
+/// 2 MiB thread in a debug build while the decoder still allowed 4,096 (ledger #1326). One
+/// bound for both sides also keeps the codec closed: every datum the reader yields encodes and
+/// decodes back, and the decoder yields nothing the reader would refuse. 512 is still ~20x
+/// deeper than any legitimately authored s-expression.
+pub(crate) const MAX_SEXPR_DEPTH: usize = 512;
 
 /// Parse exactly one top-level s-expression from `src`. Whitespace and `;` line comments
 /// are skipped. Errors on an empty input, unbalanced parens, an unterminated string, or
@@ -278,7 +284,7 @@ impl Reader {
 
     /// Read one form (assumes trivia already skipped). `Ok(None)` at end of input. `depth` is
     /// the current list-nesting level, threaded so a list bounds its children (see
-    /// [`read_list`](Self::read_list) and [`MAX_READ_DEPTH`]).
+    /// [`read_list`](Self::read_list) and [`MAX_SEXPR_DEPTH`]).
     fn read_form(&mut self, depth: usize) -> SexprResult<Option<Sexpr>> {
         match self.peek() {
             None => Ok(None),
@@ -292,11 +298,11 @@ impl Reader {
     }
 
     /// Read a `( … )` list. Errors if the closing paren is missing, or — guarding the stack
-    /// against a hostile deeply-nested input — if nesting would exceed [`MAX_READ_DEPTH`].
+    /// against a hostile deeply-nested input — if nesting would exceed [`MAX_SEXPR_DEPTH`].
     fn read_list(&mut self, depth: usize) -> SexprResult<Sexpr> {
-        if depth >= MAX_READ_DEPTH {
+        if depth >= MAX_SEXPR_DEPTH {
             return Err(SexprError::Parse(format!(
-                "s-expression nests deeper than the reader limit ({MAX_READ_DEPTH})"
+                "s-expression nests deeper than the reader limit ({MAX_SEXPR_DEPTH})"
             )));
         }
         self.pos += 1; // consume '('
