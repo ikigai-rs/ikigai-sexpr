@@ -982,6 +982,132 @@ mod code_graph {
             "SPARQL found the head symbol"
         );
     }
+
+    /// The exact bytes of one encoding, every node IRI included. A node's IRI is the content
+    /// hash of its subtree, and consumers key on it (signing, caching, sharing across
+    /// documents), so a change to how the hash is computed must never change what it is.
+    #[test]
+    fn the_encoding_is_pinned_byte_for_byte() {
+        let s = parse(r#"(a "s" -1 () ((x y) (x y)) (a))"#).unwrap();
+        assert_eq!(sexpr_to_rdf(&s).unwrap(), PINNED_ENCODING);
+    }
+
+    /// The encoder answers byte for byte what the encoder before ledger #1332 answered (kept
+    /// as `codegraph::reference`), over hand-picked shapes and a few thousand generated ones:
+    /// every atom kind, empty lists, sharing within and across levels, long and deep lists.
+    #[test]
+    fn the_encoder_answers_exactly_what_the_rehashing_encoder_answered() {
+        use crate::codegraph::reference;
+        let wrap = |depth: usize, inner: Sexpr| (0..depth).fold(inner, |d, _| Sexpr::List(vec![d]));
+        let mut corpus = vec![
+            Sexpr::Symbol("select".into()),
+            Sexpr::Str("hello \"world\"\n\tπ".into()),
+            Sexpr::Str(String::new()),
+            Sexpr::Int(0),
+            Sexpr::Int(i64::MIN),
+            Sexpr::Int(i64::MAX),
+            Sexpr::List(Vec::new()),
+            parse("(())").unwrap(),
+            parse("(() () ())").unwrap(),
+            parse("((x y) (x y))").unwrap(),
+            parse("((x y) y)").unwrap(),
+            parse("(y (x y))").unwrap(),
+            parse(r#"(a "a" 1 (a "a" 1) ((a "a" 1)))"#).unwrap(),
+            parse("(select (?s ?p ?o) (where (?s ?p ?o)) (limit 10))").unwrap(),
+            wrap(511, parse("(a b c)").unwrap()),
+            Sexpr::List((0..2000).map(|i| Sexpr::Int(i % 7)).collect()),
+        ];
+        // A deterministic generator (an LCG): trees up to 6 deep and 6 wide, drawing atoms from
+        // a small alphabet and reusing earlier subtrees, so sharing is common.
+        let mut state: u64 = 0x1332;
+        let mut next = move |n: u64| {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (state >> 33) % n
+        };
+        let mut pool: Vec<Sexpr> = Vec::new();
+        fn generate(
+            depth: usize,
+            next: &mut dyn FnMut(u64) -> u64,
+            pool: &mut Vec<Sexpr>,
+        ) -> Sexpr {
+            let made = match next(if depth == 0 { 4 } else { 6 }) {
+                0 => Sexpr::Symbol(["a", "b", "?s"][next(3) as usize].into()),
+                1 => Sexpr::Str(["a", "", "b c"][next(3) as usize].into()),
+                2 => Sexpr::Int(next(3) as i64 - 1),
+                3 if !pool.is_empty() => pool[next(pool.len() as u64) as usize].clone(),
+                3 => Sexpr::List(Vec::new()),
+                _ => {
+                    let width = next(7) as usize;
+                    Sexpr::List(
+                        (0..width)
+                            .map(|_| generate(depth - 1, next, pool))
+                            .collect(),
+                    )
+                }
+            };
+            if pool.len() < 64 {
+                pool.push(made.clone());
+            }
+            made
+        }
+        for _ in 0..3000 {
+            corpus.push(generate(6, &mut next, &mut pool));
+        }
+        let mut shared = 0;
+        for s in &corpus {
+            let ttl = sexpr_to_rdf(s).unwrap();
+            assert_eq!(ttl, reference::sexpr_to_rdf(s), "for {s:?}");
+            // Count the data that exercises sharing: fewer cells than list elements.
+            let cells = ttl.matches(" rdf:first ").count();
+            if cells < count_cells(s) {
+                shared += 1;
+            }
+        }
+        assert!(
+            shared > 100,
+            "the corpus exercises sharing ({shared} data share a cell)"
+        );
+    }
+
+    /// The cons cells a datum has as a tree (one per list element), before any sharing.
+    fn count_cells(s: &Sexpr) -> usize {
+        match s {
+            Sexpr::List(items) => items.len() + items.iter().map(count_cells).sum::<usize>(),
+            _ => 0,
+        }
+    }
+
+    // Captured from the encoder before ledger #1332 changed how it computes hashes.
+    const PINNED_ENCODING: &str = concat!(
+        "@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .\n",
+        "@prefix sx: <https://ikigai-rs.dev/ns/sexpr#> .\n",
+        "@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\n",
+        "<urn:sexpr:document> sx:root <urn:sexpr:49490f21e8996d3394ccaea5489f65b9c9310dc2bd8f3de0a22755f98508b568> .\n",
+        "<urn:sexpr:05ace506e798158d6a61e0dd9e72b6c9ba2d7200f9d549e858df87445b0d44e1> rdf:first \"a\"^^sx:symbol .\n",
+        "<urn:sexpr:05ace506e798158d6a61e0dd9e72b6c9ba2d7200f9d549e858df87445b0d44e1> rdf:rest rdf:nil .\n",
+        "<urn:sexpr:20be6ff3377d792e83d4ff5272a9c8b5d17496c14707ade441cdc37bfa588141> rdf:first <urn:sexpr:64edf6d7ff46029ada97911cc8cb02f7819d760a59a34ff5a843ea9f4a7e36df> .\n",
+        "<urn:sexpr:20be6ff3377d792e83d4ff5272a9c8b5d17496c14707ade441cdc37bfa588141> rdf:rest rdf:nil .\n",
+        "<urn:sexpr:35d1a69306ddb121450016473d97c414b30264d0c986d96fc50b5c7113ace47b> rdf:first \"s\"^^xsd:string .\n",
+        "<urn:sexpr:35d1a69306ddb121450016473d97c414b30264d0c986d96fc50b5c7113ace47b> rdf:rest <urn:sexpr:49a6935a0c7f401ea4b3df0fd53b81dd1a52d0673e9df90aad090020653e8edf> .\n",
+        "<urn:sexpr:49490f21e8996d3394ccaea5489f65b9c9310dc2bd8f3de0a22755f98508b568> rdf:first \"a\"^^sx:symbol .\n",
+        "<urn:sexpr:49490f21e8996d3394ccaea5489f65b9c9310dc2bd8f3de0a22755f98508b568> rdf:rest <urn:sexpr:35d1a69306ddb121450016473d97c414b30264d0c986d96fc50b5c7113ace47b> .\n",
+        "<urn:sexpr:49a6935a0c7f401ea4b3df0fd53b81dd1a52d0673e9df90aad090020653e8edf> rdf:first \"-1\"^^xsd:integer .\n",
+        "<urn:sexpr:49a6935a0c7f401ea4b3df0fd53b81dd1a52d0673e9df90aad090020653e8edf> rdf:rest <urn:sexpr:ede9be1efa7697ffc4c9d26234c8b0ea2a36b58ef3f993f5b362cf52ac95e714> .\n",
+        "<urn:sexpr:4c9f63024accf11930cdc2a91a04ab11fb491be52643624032f503c462033c73> rdf:first <urn:sexpr:5c59a841e41195d67c721fc2bb585710128bb78a96c7fd425a451494e45ffe71> .\n",
+        "<urn:sexpr:4c9f63024accf11930cdc2a91a04ab11fb491be52643624032f503c462033c73> rdf:rest <urn:sexpr:e2abc4795fd45551ceac5f6eb765cd53723e5ba4b0f6172893d1b8a71a4755ac> .\n",
+        "<urn:sexpr:5c59a841e41195d67c721fc2bb585710128bb78a96c7fd425a451494e45ffe71> rdf:first <urn:sexpr:64edf6d7ff46029ada97911cc8cb02f7819d760a59a34ff5a843ea9f4a7e36df> .\n",
+        "<urn:sexpr:5c59a841e41195d67c721fc2bb585710128bb78a96c7fd425a451494e45ffe71> rdf:rest <urn:sexpr:20be6ff3377d792e83d4ff5272a9c8b5d17496c14707ade441cdc37bfa588141> .\n",
+        "<urn:sexpr:64edf6d7ff46029ada97911cc8cb02f7819d760a59a34ff5a843ea9f4a7e36df> rdf:first \"x\"^^sx:symbol .\n",
+        "<urn:sexpr:64edf6d7ff46029ada97911cc8cb02f7819d760a59a34ff5a843ea9f4a7e36df> rdf:rest <urn:sexpr:658331eeb2922fd7cae4025d8017eead873748e5f3357c48c266dc8c7979a6cf> .\n",
+        "<urn:sexpr:658331eeb2922fd7cae4025d8017eead873748e5f3357c48c266dc8c7979a6cf> rdf:first \"y\"^^sx:symbol .\n",
+        "<urn:sexpr:658331eeb2922fd7cae4025d8017eead873748e5f3357c48c266dc8c7979a6cf> rdf:rest rdf:nil .\n",
+        "<urn:sexpr:e2abc4795fd45551ceac5f6eb765cd53723e5ba4b0f6172893d1b8a71a4755ac> rdf:first <urn:sexpr:05ace506e798158d6a61e0dd9e72b6c9ba2d7200f9d549e858df87445b0d44e1> .\n",
+        "<urn:sexpr:e2abc4795fd45551ceac5f6eb765cd53723e5ba4b0f6172893d1b8a71a4755ac> rdf:rest rdf:nil .\n",
+        "<urn:sexpr:ede9be1efa7697ffc4c9d26234c8b0ea2a36b58ef3f993f5b362cf52ac95e714> rdf:first rdf:nil .\n",
+        "<urn:sexpr:ede9be1efa7697ffc4c9d26234c8b0ea2a36b58ef3f993f5b362cf52ac95e714> rdf:rest <urn:sexpr:4c9f63024accf11930cdc2a91a04ab11fb491be52643624032f503c462033c73> .\n",
+    );
 }
 
 // ---- slice 3c.2: the to-rdf / from-rdf endpoints, end-to-end through the kernel ----
