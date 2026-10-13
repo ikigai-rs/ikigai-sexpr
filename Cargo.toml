@@ -56,7 +56,7 @@ getrandom = { version = "0.3", features = ["wasm_js"] }
 # is built from — compiling neither `sha2` nor `oxrdfio` (and so neither of oxrdfio's RDF/XML
 # and JSON-LD parsers). That is the build for a page that only reads arrangements: ledger
 # #649 measured the tutorial's tic-tac-toe page paying ~170 KB gzip for surfaces it never
-# mounted. CI's `arrangement only` job holds this configuration to the same gates.
+# mounted. CI's `no default features` leg holds this configuration to the same gates.
 default = ["full"]
 full = ["dep:sha2", "dep:oxrdf", "dep:oxrdfio"]
 
