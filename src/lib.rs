@@ -19,7 +19,7 @@
 //!    [`SexprError`], never a panic. Clauses may appear in any order; output is emitted in
 //!    canonical order.
 //! 3. **The endpoints** — two first-class `ik:Transreptor`s, the only layer that depends
-//!    on `ikigai-core`: [`urn:sparql:from-sexpr`](space) (`text/x-sexpr` →
+//!    on `ikigai-core`: [`urn:sparql:from-sexpr`][`space`] (`text/x-sexpr` →
 //!    `application/sparql-query`, requires a `(select …)`) and `urn:rdf:from-sexpr`
 //!    (`text/x-sexpr` → `text/turtle`, requires a `(graph …)`). Both read the same
 //!    `text/x-sexpr` input; they disambiguate by **output media type** *and* by the
@@ -76,7 +76,15 @@
 //! ```toml
 //! ikigai-sexpr = { version = "0.1", default-features = false }
 //! ```
-
+// `space` exists only under `full`, so the link target the docs above name as [`space`] is
+// chosen per feature set: the function itself, or (built without it) the Features section
+// that says why it is absent. Without this, `cargo doc --no-default-features` fails on an
+// unresolved link.
+#![cfg_attr(feature = "full", doc = "[`space`]: crate::space")]
+#![cfg_attr(
+    not(feature = "full"),
+    doc = "[`space`]: crate#features-mount-only-what-a-page-reads"
+)]
 #![forbid(unsafe_code)]
 
 pub mod arrangement;

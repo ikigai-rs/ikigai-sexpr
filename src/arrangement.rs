@@ -162,7 +162,15 @@ const SKOLEM_PREFIX: &str = "urn:ikigai:space:_:";
 ///
 /// The space names itself [`ARRANGEMENT_SPACE_ID`] (`urn:iki:space:sexpr:arrangement`), never
 /// `urn:iki:space:sexpr`: a name says which doors a space holds, and this one holds two of the
-/// six that [`space`](crate::space) holds.
+/// six that [`space`] holds.
+///
+// `space` exists only under `full`; built without it, the link goes to the crate's Features
+// section instead, so `cargo doc --no-default-features` resolves it.
+#[cfg_attr(feature = "full", doc = "[`space`]: crate::space")]
+#[cfg_attr(
+    not(feature = "full"),
+    doc = "[`space`]: crate#features-mount-only-what-a-page-reads"
+)]
 pub fn arrangement_space() -> EndpointSpace {
     EndpointSpace::new()
         .bind(Exact::new("urn:sexpr:arrangement-to-rdf"), ArrangementToRdf)
