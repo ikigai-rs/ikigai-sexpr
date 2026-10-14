@@ -40,7 +40,7 @@
 //!
 //! No opt-outs, and NAMES runs: every id is already a kebab-case noun.
 
-use ikigai_conformance::{Fixture, Suite};
+use ikigai_conformance::{Check, Checks, Fixture, Suite};
 use ikigai_core::{ArgRef, Capability, Error, Iri, Kernel, Representation, Request, Verb};
 use ikigai_sexpr::{
     arrangement_space, arrangement_to_turtle, parse, sexpr_to_rdf, space, ARRANGEMENT_SPACE_ID,
@@ -169,6 +169,9 @@ fn conforms() {
         0,
         "every check runs: {report}"
     );
+    // And every invoking check observed every action: an unprobed action is a gap
+    // in the walk (for REQUIRED, a drop that was never tried), not a pass.
+    assert!(report.unprobed.is_empty(), "{report}");
     // The exported names are the names the suite checked.
     assert_eq!(ikigai_core::space_iri("sexpr").as_str(), SPACE_ID);
     assert_eq!(
@@ -254,14 +257,21 @@ fn declared_outputs_are_the_transreption_targets() {
 ///
 /// ⚠ This module declares `content` REQUIRED and `in` optional, and that declaration
 /// is deliberately lenient at invoke: an `in=`-only call SUCCEEDS. By the letter of
-/// #49 that is "declared required, actually optional", so an automated
-/// required-is-required check WILL flag these six — and the flag is correct; the
-/// declaration really is untrue. It is the lesser of two untruths, because
-/// `ArgSpec` has no "exactly one of" group (`ikigai-core-PENDING.md` §29) and the
-/// alternative — both intakes optional, which is what 0.1.3 first shipped — makes
-/// the REPL refuse to pipe into any of them at all (`source_request` fills the one
-/// unnamed REQUIRED by-value input; with none required it errors). See
-/// `src/lib.rs`'s `CONTENT_IS_REQUIRED` and the README.
+/// #49 that is "declared required, actually optional", and the declaration really is
+/// untrue. It is the lesser of two untruths, because `ArgSpec` has no "exactly one
+/// of" group (`ikigai-core-PENDING.md` §29) and the alternative — both intakes
+/// optional, which is what 0.1.3 first shipped — makes the REPL refuse to pipe into
+/// any of them at all (`source_request` fills the one unnamed REQUIRED by-value
+/// input; with none required it errors). See `src/lib.rs`'s `CONTENT_IS_REQUIRED`
+/// and the README.
+///
+/// The suite's own `REQUIRED` (conformance 0.8.0) drops `content` from the call
+/// the FIXTURE made, which names only `content`, so it sees the typed refusal below
+/// and passes: the "optional alternative to a required input" its README lists
+/// under what the suite cannot see. A fixture that also sent `in` would make it
+/// flag all six, and
+/// [`the_suites_required_check_sees_the_leniency_when_the_fixture_sends_in`] pins
+/// that, so the clean report is not the check failing to look.
 ///
 /// So the pin runs both ways: each spelling ALONE works (the leniency, stated rather
 /// than discovered), and the empty call is a typed `MissingArgument` naming `content`.
@@ -278,6 +288,37 @@ fn either_intake_alone_works_and_neither_is_a_typed_missing_argument() {
             other => panic!("{iri} with no document: expected MissingArgument, got {other:?}"),
         }
     }
+}
+
+/// The witness that `REQUIRED` is not vacuous here. `conforms` reports it clean
+/// because every fixture names `content` alone, so dropping `content` leaves an empty
+/// call, which is refused with a typed `MissingArgument`. Send `in` beside it and the
+/// same check, on the same six actions, finds the `in=`-only call that succeeds: the
+/// leniency the test above states. If the suite ever stopped dropping required
+/// inputs (or this module stopped declaring `content` required), `conforms` would
+/// stay green and this would fail.
+#[test]
+fn the_suites_required_check_sees_the_leniency_when_the_fixture_sends_in() {
+    let suite = ENDPOINTS
+        .iter()
+        .fold(Suite::new().checks(Checks::REQUIRED), |suite, (_, id)| {
+            let input = fixture_input(id);
+            suite.fixture(
+                Fixture::new(*id, Verb::Source)
+                    .arg("content", input.clone())
+                    .arg("in", input),
+            )
+        });
+    let report = suite.run_blocking(&kernel());
+    let flagged: Vec<&str> = report
+        .findings
+        .iter()
+        .filter(|f| f.check == Check::Required)
+        .map(|f| f.endpoint.as_str())
+        .collect();
+    let expected: Vec<&str> = ENDPOINTS.iter().map(|(_, id)| *id).collect();
+    assert_eq!(flagged, expected, "{report}");
+    assert_eq!(report.findings.len(), ENDPOINTS.len(), "{report}");
 }
 
 /// **CLASS-IS-ENFORCED, by hand** (conformance PENDING #118/#124): send a

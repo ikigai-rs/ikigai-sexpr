@@ -63,10 +63,11 @@ full = ["dep:sha2", "dep:oxrdf", "dep:oxrdfio"]
 [dev-dependencies]
 futures = "0.3" # block_on for the async endpoint test
 # The module recipe as one test (`tests/conformance.rs`): walks every endpoint
-# `space()` binds and reports every violation of the recipe at once. Dev-dep ONLY. 0.6.0
-# for SPACE-NAME: both spaces are declared self-named and held to it. ⚠ `^0.6.0` is `<0.7.0`:
-# a later suite is a deliberate re-pin, not something this range picks up.
-ikigai-conformance = "0.6.0"
+# `space()` binds and reports every violation of the recipe at once. Dev-dep ONLY. 0.8.0
+# for REQUIRED (each required input dropped must be refused, typed) on top of 0.7's VALIDATE
+# and 0.6's SPACE-NAME. ⚠ `^0.8.0` is `<0.9.0`: a later suite is a deliberate re-pin, not
+# something this range picks up.
+ikigai-conformance = "0.8.0"
 # Not used directly: the floor for the vocabulary conformance checks the Turtle faces
 # against. The arrangement Turtle uses the ik: arrangement terms (ik:Door, ik:doors,
 # ik:endpointName, ik:matchKind, ik:RewriteRule, …), which ikigai-vocab defines from
