@@ -75,9 +75,11 @@ ikigai-conformance = "0.8.0"
 ikigai-vocab = "0.1.83"
 # The real SPARQL engine, so the transreptor's emitted query is proven to RUN
 # end-to-end (`urn:sparql:select` over its always-loaded vocabulary graph). Dev-dep
-# ONLY. `0.1.5` pins ikigai-core `0.1.35` (caret), unifying with ours to one kernel
-# type across the test build.
-ikigai-sparql = "0.1.5"
+# ONLY. Its ikigai-core requirement is a caret on the 0.1 line, unifying with ours to one
+# kernel type across the test build. 0.2.5 (ledger #1515): the old `"0.1.5"` was a CEILING
+# (`<0.2.0`) that held the tests on the 0.1 line of the engine; 0.2.5 is the release whose
+# missing required inputs refuse as typed MissingArgument. ⚠ `^0.2.5` is `<0.3.0`.
+ikigai-sparql = "0.2.5"
 # `oxrdf`/`oxrdfio` (the Oxigraph Turtle parser the graph tests re-parse output with) are
 # now runtime deps — see [dependencies] — so no dev-only entry is needed. The 3c validity
 # tests and the 3c.2 round-trip/content-addressing tests re-parse output from there.
