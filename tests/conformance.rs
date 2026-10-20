@@ -164,10 +164,11 @@ fn conforms() {
         ENDPOINTS.len(),
         "one Source action per endpoint: {report}"
     );
+    // The one skip is FAILURES (0.10.0), OFF until a suite opts in with `check_failures()`.
     assert_eq!(
         report.checks.skipped().count(),
-        0,
-        "every check runs: {report}"
+        1,
+        "every check but FAILURES runs: {report}"
     );
     // And every invoking check observed every action: an unprobed action is a gap
     // in the walk (for REQUIRED, a drop that was never tried), not a pass.
