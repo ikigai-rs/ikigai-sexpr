@@ -522,6 +522,58 @@ fn alias_rules_are_read_in_the_order_core_holds_them() {
     assert_eq!(arrangement_to_topology(&text).unwrap(), coded.topology());
 }
 
+/// A view — a rule resolving at the ROOT of the caller's chain (`ik:resolveAt "root"`) — is
+/// part of the arrangement: an alias holding a view and an ordinary child rule goes around
+/// every loop with the view still a view (ledger #2085). Only the view says where it
+/// resolves; a child rule is printed as it always was.
+#[test]
+fn a_view_keeps_resolving_at_the_root() {
+    let hello = says("hello");
+    let registry = registry(&[&hello]);
+    let table = AliasTable::new()
+        .exact("urn:old:hello", "urn:x:hello")
+        .exact_at_root("urn:view:hello", "urn:x:hello")
+        .prefix_at_root("urn:view:all:", "urn:x:");
+    let leaf = EndpointSpace::new().bind_arc(Exact::new("urn:x:hello"), Arc::clone(&hello));
+    let coded: Arc<dyn Space> = Arc::new(Alias::new(Arc::new(table), Arc::new(leaf)));
+    let tree = coded.topology();
+    let SpaceKind::Alias { rules, .. } = &tree.kind else {
+        panic!("{tree:?}")
+    };
+    assert_eq!(
+        rules
+            .iter()
+            .map(|rule| rule.at.keyword())
+            .collect::<Vec<_>>(),
+        ["root", "child", "root"],
+        "core reports the views"
+    );
+    round_trip(
+        coded,
+        &registry,
+        concat!(
+            "(alias\n",
+            "  (exact \"urn:view:hello\" \"urn:x:hello\" :resolve-at root)\n",
+            "  (exact \"urn:old:hello\" \"urn:x:hello\")\n",
+            "  (prefix \"urn:view:all:\" \"urn:x:\" :resolve-at root)\n",
+            "  (endpoints\n",
+            "    (door \"urn:x:hello\" hello)))\n",
+        ),
+        &[
+            "urn:view:hello",
+            "urn:view:all:hello",
+            "urn:old:hello",
+            "urn:x:hello",
+        ],
+    );
+    // `:resolve-at child` is the default written out: one arrangement, printed without it.
+    assert_eq!(
+        arrangement_to_topology("(alias (exact \"urn:a\" \"urn:b\" :resolve-at child) (fallback))")
+            .unwrap(),
+        arrangement_to_topology("(alias (exact \"urn:a\" \"urn:b\") (fallback))").unwrap()
+    );
+}
+
 // ---- refusals --------------------------------------------------------------------------
 
 /// Read `src`, expecting a refusal at `at` whose reason contains `because`.
@@ -632,6 +684,16 @@ fn a_malformed_pattern_or_identity_is_refused() {
         "(limit \"urn:x:{a}{\")",
         "root (limit)",
         "is not a URI template",
+    );
+    refused(
+        "(alias (exact \"urn:a\" \"urn:b\" :resolve-at parent) (fallback))",
+        "root (alias) › rule 1",
+        "`:resolve-at` is child (the default) or root",
+    );
+    refused(
+        "(alias (exact \"urn:a\" \"urn:b\" :resolve-at \"root\") (fallback))",
+        "root (alias) › rule 1",
+        "a symbol",
     );
     refused(
         "(fallback :id \"not an iri\")",

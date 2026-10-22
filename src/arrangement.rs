@@ -23,7 +23,7 @@
 //!        | (level "iri" [:seals ("prefix"…)] [:namespace "prefix"] space) ; ik:Level
 //!        | (ref "iri")                               ; a named space declared EARLIER
 //! door  := (door "pattern" endpoint [:match exact|template] [:confined space])
-//! rule  := (exact "from" "to") | (prefix "from" "to")
+//! rule  := (exact "from" "to" [:resolve-at root]) | (prefix "from" "to" [:resolve-at root])
 //! ```
 //!
 //! - **The common case is short.** A door's match kind is inferred from its pattern — a `{`
@@ -43,6 +43,10 @@
 //!   specific first whatever order they were added in (the longest name first, an exact rule
 //!   ahead of a prefix one), so they are read, and printed, in that order. Doors and layers
 //!   are the opposite: their order is meaning (first match wins), and it is kept exactly.
+//! - **A view says so.** A rule rewrites a name inside the alias's own child unless it says
+//!   `:resolve-at root` (core's `ik:resolveAt "root"`): then it is a VIEW, resolving the
+//!   rewritten name from the root of the caller's chain. `child` is the default, accepted and
+//!   never printed, as core never writes it.
 //!
 //! ## What is refused, and why
 //!
@@ -99,8 +103,8 @@ use async_trait::async_trait;
 use ikigai_core::{
     space_iri, ArgSpec, DeclarationBound, DeclarationError, Description, Door, Endpoint,
     EndpointSpace, Error as CoreError, Exact, Invocation, Iri, MatchKind, ReprType, Representation,
-    Result as CoreResult, RuleKind, SpaceKind, Topology, TopologyRule, UriTemplate, Verb,
-    DEFAULT_MAX_HOPS, MAX_DECLARATION_DEPTH, MAX_DECLARATION_NODES, MAX_DECLARATION_TEXT,
+    ResolveAt, Result as CoreResult, RuleKind, SpaceKind, Topology, TopologyRule, UriTemplate,
+    Verb, DEFAULT_MAX_HOPS, MAX_DECLARATION_DEPTH, MAX_DECLARATION_NODES, MAX_DECLARATION_TEXT,
 };
 
 use crate::{
@@ -1058,7 +1062,21 @@ impl Reader {
                 ))
             }
         };
-        p.allow(at, &[])?;
+        p.allow(at, &["resolve-at"])?;
+        let resolve_at = match p.option("resolve-at") {
+            None => ResolveAt::Child,
+            Some(Sexpr::Symbol(word)) if word == "child" => ResolveAt::Child,
+            Some(Sexpr::Symbol(word)) if word == "root" => ResolveAt::Root,
+            Some(other) => {
+                return Err(ArrangementError::new(
+                    at,
+                    format!(
+                        "`:resolve-at` is child (the default) or root — a symbol; found {}",
+                        show(other)
+                    ),
+                ))
+            }
+        };
         let [from, to] = p.args[..] else {
             return Err(count(
                 at,
@@ -1073,7 +1091,8 @@ impl Reader {
             kind,
             string(from, at, "a rule's name")?,
             string(to, at, "a rule's rewrite")?,
-        ))
+        )
+        .resolving_at(resolve_at))
     }
 }
 
@@ -1331,12 +1350,18 @@ impl Printer {
                 let mut rules = rules.clone();
                 in_table_order(&mut rules);
                 for rule in &rules {
-                    children.push(Block::leaf(format!(
+                    let mut leaf = format!(
                         "{} {} {}",
                         rule.kind.keyword(),
                         render_string_literal(&rule.from),
                         render_string_literal(&rule.to)
-                    )));
+                    );
+                    // Only a view says where it resolves, as in core's Turtle: a child rule
+                    // is printed as it was before views existed.
+                    if rule.at != ResolveAt::Child {
+                        leaf.push_str(&format!(" :resolve-at {}", rule.at.keyword()));
+                    }
+                    children.push(Block::leaf(leaf));
                 }
                 children.push(self.space(&tree.children[0], &format!("{here} › space"))?);
             }
@@ -1561,8 +1586,8 @@ impl Endpoint for ArrangementToRdf {
                  file) to the ik: Turtle core builds a space from — LOSSLESSLY, checked by \
                  reading the Turtle back. Pipe the arrangement in (or pass `in=`): one space form, \
                  `(endpoints (door \"pattern\" endpoint)…)`, `(fallback space…)`, \
-                 `(mount \"prefix\" space)`, `(alias (exact \"from\" \"to\")… space)`, \
-                 `(limit \"family\")`, `(level \"iri\" :seals (\"prefix\"…) space)` or \
+                 `(mount \"prefix\" space)`, \
+                 `(alias (exact \"from\" \"to\" [:resolve-at root])… space)`, `(limit \"family\")`, `(level \"iri\" :seals (\"prefix\"…) space)` or \
                  `(ref \"iri\")`, with `:id \"iri\"` naming a space. What core cannot build \
                  (opaque, rewrite, chain) is refused, never skipped. Comments are not kept.",
             )

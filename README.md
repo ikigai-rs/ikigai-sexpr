@@ -102,12 +102,15 @@ space := (endpoints [:id "iri"] door…)
        | (level "iri" [:seals ("prefix"…)] [:namespace "prefix"] space)
        | (ref "iri")                  ; a named space declared earlier
 door  := (door "pattern" endpoint [:match exact|template] [:confined space])
-rule  := (exact "from" "to") | (prefix "from" "to")
+rule  := (exact "from" "to" [:resolve-at root]) | (prefix "from" "to" [:resolve-at root])
 ```
 
 A declaration arranges endpoints the host registered, by name, and never mints one.
 Anonymous spaces are nesting; `:id` names one. A door's match kind is inferred (a `{`
-means a template), and `:match` is written only when the inference is wrong. Whatever
+means a template), and `:match` is written only when the inference is wrong. An alias
+rule rewrites a name inside the alias's own child unless it says `:resolve-at root` —
+core's `ik:resolveAt "root"`, a VIEW resolved from the root of the caller's chain;
+`child` is the default and is never printed. Whatever
 core cannot build — an opaque peer, a closure rewrite, a chain — is refused with where
 and why, never skipped.
 
