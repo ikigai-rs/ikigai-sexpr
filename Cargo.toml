@@ -1,6 +1,6 @@
 [package]
 name = "ikigai-sexpr"
-version = "0.2.4"
+version = "0.3.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "Neutral, language-agnostic s-expression foundation for ikigai's portable-code arc: a `Sexpr` datum + reader/printer, pure kernel-free compilers (escaping/validation, never interpolation) turning s-exprs into SPARQL (`urn:sparql:from-sexpr` → application/sparql-query) and into an RDF graph as Turtle (`urn:rdf:from-sexpr` → text/turtle), and a kernel's arrangement as an s-expression, transrepted losslessly to and from the ik: Turtle core builds a space from (`urn:sexpr:arrangement-to-rdf`, text/x-ikigai-arrangement) — with no lisp engine at all."
@@ -11,24 +11,11 @@ keywords = ["ikigai", "roc", "sexpr", "sparql", "transreptor"]
 categories = ["compilers", "parser-implementations"]
 
 [dependencies]
-# The published kernel, consumed from crates.io — the SAME version the hosts use,
-# so a host links exactly one `ikigai-core`. 0.1.110 is the floor for `ResolveAt` (ledger #2061):
-# an alias rule that is a VIEW (`ik:resolveAt "root"`), which an arrangement reads and prints as
-# `:resolve-at root` (ledger #2085). Before that, 0.1.89 was the floor for `space_iri`, the name
-# both spaces claim (`urn:iki:space:sexpr`, `urn:iki:space:sexpr:arrangement`, ledger #987),
-# and because 0.1.89 is the release where binding a door onto a named space drops the name, so
-# a host that extends either space cannot carry the claim over different doors. Before that,
-# 0.1.84 was the floor because the arrangement
-# surface relies on core's declaration BOUNDS (`MAX_DECLARATION_DEPTH`/`_NODES`/`_TEXT` and
-# `DeclarationError::TooLarge`, new in 0.1.84): `Topology::from_turtle` refuses an oversized
-# document itself, so this crate no longer measures Turtle before handing it over, and the
-# s-expression reader counts in core's units so the two refuse alike. It goes THROUGH core's
-# `Topology` (`Door`, `MatchKind`, `TopologyRule`, and `Topology::from_turtle` behind the
-# `declare` feature, 0.1.78–0.1.83) as before.
-# ⚠ Under 0.x caret rules this is also a CEILING: `^0.1.110` admits 0.1.110 up to, not
-# including, 0.2.0. `declare` brings `oxttl` and `oxrdf`.
-# The `Sexpr` datum, reader, printer, and the SPARQL/Turtle compilers stay kernel-free.
-ikigai-core = { version = "0.1.110", features = ["declare"] }
+# 0.2.0 is the streams release (ledger #2261). Under 0.x caret rules,
+# the old 0.1 pin meant <0.2.0 and could not pick up this release.
+# `declare` supplies the arrangement surface's Topology reader and bounds.
+# The datum, reader, printer, and SPARQL/Turtle compilers stay kernel-free.
+ikigai-core = { version = "0.2.0", features = ["declare"] }
 async-trait = "0.1"
 
 # Slice 3c.2 lossless code-as-graph: the encoder content-addresses cons cells with a
@@ -64,25 +51,14 @@ full = ["dep:sha2", "dep:oxrdf", "dep:oxrdfio"]
 
 [dev-dependencies]
 futures = "0.3" # block_on for the async endpoint test
-# The module recipe as one test (`tests/conformance.rs`): walks every endpoint
-# `space()` binds and reports every violation of the recipe at once. Dev-dep ONLY. 0.10.0:
-# 0.9 adds core 0.1.105's contract-shape checks (REQUIRED probes input groups, OUTPUTS honors
-# output_from, PIPELINE's named-only line, VALIDATE refuses a default on a binding) and
-# RECOMPUTE; 0.10 adds FAILURES, OFF unless a suite opts in. ⚠ `^0.10.0` is `<0.11.0`: a
-# later suite is a deliberate re-pin, not something this range picks up.
-ikigai-conformance = "0.10.0"
-# Not used directly: the floor for the vocabulary conformance checks the Turtle faces
-# against. The arrangement Turtle uses the ik: arrangement terms (ik:Door, ik:doors,
-# ik:endpointName, ik:matchKind, ik:RewriteRule, …), which ikigai-vocab defines from
-# 0.1.83; conformance 0.2.0 asks only for ^0.1.69, which would resolve short of them.
-ikigai-vocab = "0.1.83"
-# The real SPARQL engine, so the transreptor's emitted query is proven to RUN
-# end-to-end (`urn:sparql:select` over its always-loaded vocabulary graph). Dev-dep
-# ONLY. Its ikigai-core requirement is a caret on the 0.1 line, unifying with ours to one
-# kernel type across the test build. 0.2.5 (ledger #1515): the old `"0.1.5"` was a CEILING
-# (`<0.2.0`) that held the tests on the 0.1 line of the engine; 0.2.5 is the release whose
-# missing required inputs refuse as typed MissingArgument. ⚠ `^0.2.5` is `<0.3.0`.
-ikigai-sparql = "0.2.5"
+# The module recipe walks every endpoint, with DATATYPES and FAILURES on by default.
+ikigai-conformance = "0.11.0"
+# 0.2.0 is the streams release (ledger #2261). Under 0.x caret rules,
+# the old 0.1 pin meant <0.2.0 and could not pick up this release.
+ikigai-vocab = "0.2.0"
+# The real SPARQL engine proves emitted queries run end-to-end. 0.3.0 is
+# the newest release and depends on core 0.2.0, sharing the kernel's types.
+ikigai-sparql = "0.3.0"
 # `oxrdf`/`oxrdfio` (the Oxigraph Turtle parser the graph tests re-parse output with) are
 # now runtime deps — see [dependencies] — so no dev-only entry is needed. The 3c validity
 # tests and the 3c.2 round-trip/content-addressing tests re-parse output from there.
