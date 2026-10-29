@@ -53,8 +53,8 @@ full = ["dep:sha2", "dep:oxrdf", "dep:oxrdfio"]
 
 [dev-dependencies]
 futures = "0.3" # block_on for the async endpoint test
-# The module recipe walks every endpoint, with DATATYPES and FAILURES on by default.
-ikigai-conformance = "0.11.0"
+# The module recipe walks every endpoint, including BODIES and BODY-INPUTS.
+ikigai-conformance = "0.12.0"
 # 0.2.0 is the streams release (ledger #2261). Under 0.x caret rules,
 # the old 0.1 pin meant <0.2.0 and could not pick up this release.
 ikigai-vocab = "0.2.0"
