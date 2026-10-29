@@ -149,7 +149,10 @@ fn resolve(args: &[(&str, &str)], iri: &str) -> Result<Representation, Error> {
 
 #[test]
 fn conforms() {
-    let report = suite().run_blocking(&kernel());
+    // BODIES must resolve the same endpoint instances as the kernel.
+    let space = Arc::new(space());
+    let kernel = Kernel::new(space.clone());
+    let report = suite().body_space(space).run_blocking(&kernel);
     // Printed even when clean (`--nocapture`): the report is the record.
     eprintln!("{report}");
     assert!(report.is_clean(), "{report}");
@@ -164,7 +167,8 @@ fn conforms() {
         ENDPOINTS.len(),
         "one Source action per endpoint: {report}"
     );
-    // 0.11.0 enables DATATYPES and FAILURES by default: no check may be skipped.
+    // 0.12.0 also enables BODIES and BODY-INPUTS: no check may be skipped.
+    // No argument declares reads_body, so BODY-INPUTS has no transports to compare.
     assert_eq!(
         report.checks.skipped().count(),
         0,
