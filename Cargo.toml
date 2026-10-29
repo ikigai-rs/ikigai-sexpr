@@ -1,6 +1,6 @@
 [package]
 name = "ikigai-sexpr"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "Neutral, language-agnostic s-expression foundation for ikigai's portable-code arc: a `Sexpr` datum + reader/printer, pure kernel-free compilers (escaping/validation, never interpolation) turning s-exprs into SPARQL (`urn:sparql:from-sexpr` → application/sparql-query) and into an RDF graph as Turtle (`urn:rdf:from-sexpr` → text/turtle), and a kernel's arrangement as an s-expression, transrepted losslessly to and from the ik: Turtle core builds a space from (`urn:sexpr:arrangement-to-rdf`, text/x-ikigai-arrangement) — with no lisp engine at all."
@@ -13,9 +13,11 @@ categories = ["compilers", "parser-implementations"]
 [dependencies]
 # 0.2.0 is the streams release (ledger #2261). Under 0.x caret rules,
 # the old 0.1 pin meant <0.2.0 and could not pick up this release.
+# 0.2.5 carries named requests on `TopologyRule` (ledger #2512), which the
+# arrangement's `(name …)` rule form round-trips (ledger #2514).
 # `declare` supplies the arrangement surface's Topology reader and bounds.
 # The datum, reader, printer, and SPARQL/Turtle compilers stay kernel-free.
-ikigai-core = { version = "0.2.0", features = ["declare"] }
+ikigai-core = { version = "0.2.5", features = ["declare"] }
 async-trait = "0.1"
 
 # Slice 3c.2 lossless code-as-graph: the encoder content-addresses cons cells with a
