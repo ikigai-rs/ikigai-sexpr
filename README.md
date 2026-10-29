@@ -103,6 +103,9 @@ space := (endpoints [:id "iri"] door…)
        | (ref "iri")                  ; a named space declared earlier
 door  := (door "pattern" endpoint [:match exact|template] [:confined space])
 rule  := (exact "from" "to" [:resolve-at root]) | (prefix "from" "to" [:resolve-at root])
+       | (name "from" [:match exact|template] request input…)   ; a named request
+request := (source|sink|exists|delete|forward "to" arg value…)  ; value: "v" | (ref "iri") | (capture "var")
+input := (input arg [:summary "…"] [:class "iri"] [:default "…"] [:one-of ("…"…)] [:required true|false])
 ```
 
 A declaration arranges endpoints the host registered, by name, and never mints one.
@@ -110,7 +113,19 @@ Anonymous spaces are nesting; `:id` names one. A door's match kind is inferred (
 means a template), and `:match` is written only when the inference is wrong. An alias
 rule rewrites a name inside the alias's own child unless it says `:resolve-at root` —
 core's `ik:resolveAt "root"`, a VIEW resolved from the root of the caller's chain;
-`child` is the default and is never printed. Whatever
+`child` is the default and is never printed. A `(name …)` rule is a NAMED REQUEST, a
+binding with arguments (partial application, core's `TopologyRule::named_request`):
+
+```text
+(name "urn:quakes:count"
+  (source "urn:sparql:select" graph "urn:quakes:graph" query (ref "urn:file:queries/count.rq"))
+  (input as :default "text/csv"))
+(name "urn:quakes:event:{id}"
+  (forward "urn:quakes:compose" id (capture "id")))
+```
+
+It is always a view; what it fixes the caller cannot give, and it is refused where core's
+`AliasTable::with_rule` would refuse it (a fixed `as`, say). Whatever
 core cannot build — an opaque peer, a closure rewrite, a chain — is refused with where
 and why, never skipped.
 
@@ -204,7 +219,8 @@ hand the builder the wrong graph.
 
 **Bounded by core's bounds, in core's units.** An arrangement is held to
 `ikigai_core::MAX_DECLARATION_DEPTH` (48 spaces deep — a door's confined corridor is a level,
-the door is not), `MAX_DECLARATION_NODES` (65,536 spaces, doors and alias rules) and
+the door is not), `MAX_DECLARATION_NODES` (65,536 spaces, doors, alias rules and a named request's arguments
+and inputs) and
 `MAX_DECLARATION_TEXT` (16 MiB), a named space counted again at every place it is used. A
 Turtle document is core's own to refuse as it reads it; the s-expression reader counts the
 same way as it reads, and both refuse with core's typed `DeclarationError::TooLarge`, in

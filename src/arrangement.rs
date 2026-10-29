@@ -24,6 +24,9 @@
 //!        | (ref "iri")                               ; a named space declared EARLIER
 //! door  := (door "pattern" endpoint [:match exact|template] [:confined space])
 //! rule  := (exact "from" "to" [:resolve-at root]) | (prefix "from" "to" [:resolve-at root])
+//!        | (name "from" [:match exact|template] request input…)  ; a named request
+//! request := (source|sink|exists|delete|forward "to" arg value…) ; value: "v" | (ref "iri") | (capture "var")
+//! input := (input arg [:summary "…"] [:class "iri"] [:default "…"] [:one-of ("…"…)] [:required true|false])
 //! ```
 //!
 //! - **The common case is short.** A door's match kind is inferred from its pattern — a `{`
@@ -47,6 +50,16 @@
 //!   `:resolve-at root` (core's `ik:resolveAt "root"`): then it is a VIEW, resolving the
 //!   rewritten name from the root of the caller's chain. `child` is the default, accepted and
 //!   never printed, as core never writes it.
+//! - **A named request is a binding with arguments** (ledger #2447): `(name "from" request)`
+//!   binds the name to a request on `to` — partial application. The request's head is the
+//!   one verb it forwards (`forward` forwards every verb), and each `arg value` it fixes is
+//!   a value, a `(ref "iri")` passed by reference, or a `(capture "var")` of one of the
+//!   template's variables; `from` is a template when it has a `{` (`:match` overrides). Each
+//!   `(input …)` is one the name declares itself, required unless it has a default. It is a
+//!   view (core's `ik:resolveAt "root"`) by definition, so it says no `:resolve-at`. What
+//!   core's `AliasTable::with_rule` refuses (a fixed `as`, a capture the template lacks, an
+//!   argument fixed and declared) is refused here in core's words. A `forward` fixing and
+//!   declaring nothing is a plain view, and prints as `(exact "from" "to" :resolve-at root)`.
 //!
 //! ## What is refused, and why
 //!
@@ -80,10 +93,12 @@
 //! - **depth**: the root space is 1, and every space it encloses — a layer, the space a
 //!   mount, an alias or a level encloses, a door's confined corridor — is one deeper (a door
 //!   is not a level of its own);
-//! - **nodes**: every space, every door and every alias rule, a named space counted again at
+//! - **nodes**: every space, every door, every alias rule and every argument or input a named
+//!   request states, a named space counted again at
 //!   every place it is used — so a `ref` costs everything it stands for;
 //! - **text**: the bytes those nodes carry (every IRI a space claims, every pattern, endpoint
-//!   name, prefix, family, rule, seal and namespace), counted the same way.
+//!   name, prefix, family, rule, fixed argument, declared input, seal and namespace), counted
+//!   the same way.
 //!
 //! A Turtle document is core's to refuse: [`Topology::from_turtle`] counts as it reads, so a
 //! small document that would expand exponentially is refused after the bound, not after the
@@ -101,10 +116,11 @@ use std::fmt;
 
 use async_trait::async_trait;
 use ikigai_core::{
-    space_iri, ArgSpec, DeclarationBound, DeclarationError, Description, Door, Endpoint,
-    EndpointSpace, Error as CoreError, Exact, Invocation, Iri, MatchKind, ReprType, Representation,
-    ResolveAt, Result as CoreResult, RuleKind, SpaceKind, Topology, TopologyRule, UriTemplate,
-    Verb, DEFAULT_MAX_HOPS, MAX_DECLARATION_DEPTH, MAX_DECLARATION_NODES, MAX_DECLARATION_TEXT,
+    space_iri, AliasTable, ArgSpec, DeclarationBound, DeclarationError, Description, Door,
+    Endpoint, EndpointSpace, Error as CoreError, Exact, FixedArgument, FixedValue, Invocation, Iri,
+    MatchKind, ReprType, Representation, ResolveAt, Result as CoreResult, RuleKind, SpaceKind,
+    Topology, TopologyRule, UriTemplate, Verb, DEFAULT_MAX_HOPS, MAX_DECLARATION_DEPTH,
+    MAX_DECLARATION_NODES, MAX_DECLARATION_TEXT,
 };
 
 use crate::{
@@ -331,10 +347,27 @@ fn share(id: Option<&Iri>, kind: &SpaceKind) -> (usize, usize) {
         }
         SpaceKind::Alias { rules, .. } => {
             nodes += rules.len();
-            text += rules
-                .iter()
-                .map(|r| r.from.len() + r.to.len())
-                .sum::<usize>();
+            for rule in rules {
+                // A named request's arguments and inputs are nodes of their own.
+                nodes += rule.fixes.len() + rule.inputs.len();
+                text += rule.from.len() + rule.to.len();
+                text += rule
+                    .fixes
+                    .iter()
+                    .map(|a| a.name.len() + a.value.to_string().len())
+                    .sum::<usize>();
+                text += rule
+                    .inputs
+                    .iter()
+                    .map(|i| {
+                        i.name.len()
+                            + i.summary.len()
+                            + i.class.as_ref().map_or(0, String::len)
+                            + i.default.as_ref().map_or(0, String::len)
+                            + i.one_of.iter().map(String::len).sum::<usize>()
+                    })
+                    .sum::<usize>();
+            }
         }
         SpaceKind::Mount { prefix } => text += prefix.len(),
         SpaceKind::Limit { family, .. } => text += family.len(),
@@ -832,7 +865,7 @@ impl Reader {
                 };
                 if let Sexpr::List(items) = inner {
                     if let Some(Sexpr::Symbol(h)) = items.first() {
-                        if h == "exact" || h == "prefix" {
+                        if matches!(h.as_str(), "exact" | "prefix" | "name") {
                             return Err(ArrangementError::new(
                                 &here,
                                 "(alias …) ends with the one space it encloses, after its rules: \
@@ -1052,12 +1085,14 @@ impl Reader {
         let kind = match p.head {
             "exact" => RuleKind::Exact,
             "prefix" => RuleKind::Prefix,
+            "name" => return Self::named_request(&p, at),
             other => {
                 return Err(ArrangementError::new(
                     at,
                     format!(
-                        "an alias's rules are `(exact \"from\" \"to\")` or `(prefix \"from\" \
-                         \"to\")`, ahead of the one space it encloses; found `({other} …)`"
+                        "an alias's rules are `(exact \"from\" \"to\")`, `(prefix \"from\" \
+                         \"to\")` or `(name \"from\" (verb \"to\" …))`, ahead of the one space it \
+                         encloses; found `({other} …)`"
                     ),
                 ))
             }
@@ -1096,6 +1131,211 @@ impl Reader {
     }
 }
 
+impl Reader {
+    /// Read one NAMED REQUEST: `(name "from" (verb "to" arg value…) (input …)…)`. Core
+    /// checks the rule as `AliasTable::with_rule` would, so what it would refuse to build is
+    /// refused here, where it is written.
+    fn named_request(p: &Parts<'_>, at: &str) -> Result<TopologyRule> {
+        p.allow(at, &["match"])?;
+        let Some((from, rest)) = p.args.split_first() else {
+            return Err(count(
+                at,
+                "(name …) takes the name it binds, then its request",
+                &p.args,
+            ));
+        };
+        let Some((request, inputs)) = rest.split_first() else {
+            return Err(ArrangementError::new(
+                at,
+                "(name …) takes the name it binds, then its request `(verb \"to\" arg value…)`: \
+                 missing the request",
+            ));
+        };
+        let from = string(from, at, "a named request's name")?;
+        let template = match p.option("match") {
+            None => from.contains('{'),
+            Some(value) => match match_kind(value, at)? {
+                MatchKind::Exact => false,
+                MatchKind::Template => true,
+                _ => {
+                    return Err(ArrangementError::new(
+                        at,
+                        "a named request matches one whole name: `:match` is exact or template",
+                    ))
+                }
+            },
+        };
+        let here = format!("{at} › request");
+        let r = parts(request, &here, false)?;
+        let verb = match r.head {
+            "forward" => None,
+            "source" => Some(Verb::Source),
+            "sink" => Some(Verb::Sink),
+            "exists" => Some(Verb::Exists),
+            "delete" => Some(Verb::Delete),
+            other => {
+                return Err(ArrangementError::new(
+                    &here,
+                    format!(
+                        "a request is `(source|sink|exists|delete \"to\" arg value…)`, or \
+                         `(forward \"to\" …)` to forward every verb; found `({other} …)`"
+                    ),
+                ))
+            }
+        };
+        r.allow(&here, &[])?;
+        let Some((to, arguments)) = r.args.split_first() else {
+            return Err(count(
+                &here,
+                &format!("({} …) takes the name it forwards to", r.head),
+                &r.args,
+            ));
+        };
+        let to = string(to, &here, "a request's target")?;
+        let mut rule = if template {
+            TopologyRule::named_template(from, to)
+        } else {
+            TopologyRule::named_request(from, to)
+        };
+        rule.verb = verb;
+        let mut arguments = arguments.chunks(2);
+        for pair in arguments.by_ref() {
+            let [name, value] = pair else {
+                return Err(ArrangementError::new(
+                    &here,
+                    format!("argument {} has no value", show(pair[0])),
+                ));
+            };
+            let name = token(name, &here, "an argument's name")?;
+            rule = rule.fixing(fixed(name, value, &here)?);
+        }
+        for (i, input) in inputs.iter().enumerate() {
+            rule = rule.input(declared_input(input, &format!("{at} › input {}", i + 1))?);
+        }
+        AliasTable::new()
+            .with_rule(rule.clone())
+            .map_err(|e| ArrangementError::new(at, declaration_reason(&e)))?;
+        Ok(rule)
+    }
+}
+
+/// A name written as a symbol, or as a string when it is not a plain symbol.
+fn token<'a>(value: &'a Sexpr, at: &str, what: &str) -> Result<&'a str> {
+    match value {
+        Sexpr::Symbol(name) if keyword(value).is_none() => Ok(name),
+        Sexpr::Str(name) => Ok(name),
+        other => Err(ArrangementError::new(
+            at,
+            format!(
+                "{what} is a symbol, or a string when it is not a plain symbol; found {}",
+                show(other)
+            ),
+        )),
+    }
+}
+
+/// One argument a named request fixes: `name "value"`, `name (ref "iri")` or
+/// `name (capture "var")`.
+fn fixed(name: &str, value: &Sexpr, at: &str) -> Result<FixedArgument> {
+    if let Sexpr::Str(text) = value {
+        return Ok(FixedArgument::value(name, text.as_str()));
+    }
+    let malformed = || {
+        ArrangementError::new(
+            at,
+            format!(
+                "`{name}` is fixed to a string, `(ref \"iri\")` or `(capture \"var\")`; found {}",
+                show(value)
+            ),
+        )
+    };
+    let Sexpr::List(items) = value else {
+        return Err(malformed());
+    };
+    match &items[..] {
+        [Sexpr::Symbol(head), Sexpr::Str(text)] if head == "ref" => Iri::parse(text)
+            .map(|iri| FixedArgument::reference(name, iri))
+            .map_err(|e| {
+                ArrangementError::new(at, format!("`{name}`'s `(ref …)` is not an IRI: {e}"))
+            }),
+        [Sexpr::Symbol(head), Sexpr::Str(var)] if head == "capture" => {
+            Ok(FixedArgument::capture(name, var.as_str()))
+        }
+        _ => Err(malformed()),
+    }
+}
+
+/// One input a named request declares: `(input name [:summary "…"] [:class "iri"]
+/// [:default "…"] [:one-of ("…"…)] [:required true|false])`. Required unless it has a
+/// default, as core reads `ik:required`'s absence.
+fn declared_input(form: &Sexpr, at: &str) -> Result<ArgSpec> {
+    let p = parts(form, at, false)?;
+    if p.head != "input" {
+        return Err(ArrangementError::new(
+            at,
+            format!(
+                "a named request's request is followed only by `(input name …)` forms; found \
+                 `({} …)`",
+                p.head
+            ),
+        ));
+    }
+    p.allow(at, &["summary", "class", "default", "one-of", "required"])?;
+    let [name] = p.args[..] else {
+        return Err(count(at, "(input …) takes the input's name", &p.args));
+    };
+    let mut input = ArgSpec::new(token(name, at, "an input's name")?);
+    if let Some(summary) = p.option("summary") {
+        input.summary = string(summary, at, "`:summary`")?.to_string();
+    }
+    if let Some(class) = p.option("class") {
+        input.class = Some(string(class, at, "`:class`")?.to_string());
+    }
+    if let Some(default) = p.option("default") {
+        input.default = Some(string(default, at, "`:default`")?.to_string());
+        input.required = false;
+    }
+    if let Some(one_of) = p.option("one-of") {
+        let Sexpr::List(values) = one_of else {
+            return Err(ArrangementError::new(
+                at,
+                format!("`:one-of` is a list of strings; found {}", show(one_of)),
+            ));
+        };
+        let values = values
+            .iter()
+            .map(|v| string(v, at, "a `:one-of` value").map(str::to_string))
+            .collect::<Result<Vec<_>>>()?;
+        input = input.one_of(values);
+    }
+    match p.option("required") {
+        None => {}
+        Some(Sexpr::Symbol(word)) if word == "true" => input.required = true,
+        Some(Sexpr::Symbol(word)) if word == "false" => input.required = false,
+        Some(other) => {
+            return Err(ArrangementError::new(
+                at,
+                format!(
+                    "`:required` is true or false — a symbol; found {}",
+                    show(other)
+                ),
+            ))
+        }
+    }
+    Ok(input)
+}
+
+/// A core declaration refusal's reason, without the node it names (the location says where).
+fn declaration_reason(error: &DeclarationError) -> String {
+    match error {
+        DeclarationError::Malformed { reason, .. } => reason.clone(),
+        DeclarationError::Pattern {
+            pattern, reason, ..
+        } => format!("`{pattern}` {reason}"),
+        other => other.to_string(),
+    }
+}
+
 /// Put alias rules in the order core's [`AliasTable`](ikigai_core::AliasTable) holds them:
 /// most specific first — the longest name first, an exact rule ahead of a prefix one at equal
 /// length, then by name — and, the sort being stable, in the order written where two rules tie.
@@ -1108,7 +1348,7 @@ fn in_table_order(rules: &mut [TopologyRule]) {
         b.from
             .len()
             .cmp(&a.from.len())
-            .then_with(|| a.kind.keyword().cmp(b.kind.keyword()))
+            .then_with(|| a.match_kind().keyword().cmp(b.match_kind().keyword()))
             .then_with(|| a.from.cmp(&b.from))
     });
 }
@@ -1230,6 +1470,83 @@ struct Printer {
     seen: BTreeMap<String, Topology>,
 }
 
+/// Print one NAMED REQUEST as `(name "from" (verb "to" arg value…) (input …)…)`: `:match`
+/// only against the inference (a `{` reads as a template), and each input's options only
+/// where they say something (`:required` against "required unless it has a default").
+/// Refuses what core would refuse to build, as `AliasTable::with_rule` words it.
+fn named_request(rule: &TopologyRule, at: &str) -> Result<Block> {
+    AliasTable::new()
+        .with_rule(rule.clone())
+        .map_err(|e| ArrangementError::new(at, declaration_reason(&e)))?;
+    let mut header = format!("name {}", render_string_literal(&rule.from));
+    if rule.template != rule.from.contains('{') {
+        header.push_str(" :match ");
+        header.push_str(rule.match_kind().keyword());
+    }
+    let verb = match rule.verb {
+        None => "forward",
+        Some(Verb::Source) => "source",
+        Some(Verb::Sink) => "sink",
+        Some(Verb::Exists) => "exists",
+        Some(Verb::Delete) => "delete",
+        Some(other) => {
+            return Err(ArrangementError::new(
+                at,
+                format!("a named request cannot forward {other:?}"),
+            ))
+        }
+    };
+    let mut request = format!("{verb} {}", render_string_literal(&rule.to));
+    for argument in &rule.fixes {
+        request.push(' ');
+        request.push_str(&endpoint_token(&argument.name));
+        request.push(' ');
+        request.push_str(&match &argument.value {
+            FixedValue::Value(value) => render_string_literal(value),
+            FixedValue::Reference(iri) => format!("(ref {})", render_string_literal(iri.as_str())),
+            FixedValue::Capture(var) => format!("(capture {})", render_string_literal(var)),
+            other => {
+                return Err(ArrangementError::new(
+                    at,
+                    format!(
+                        "`{}` is fixed in a way the grammar cannot say: {other}",
+                        argument.name
+                    ),
+                ))
+            }
+        });
+    }
+    let mut children = vec![Block::leaf(request)];
+    for input in &rule.inputs {
+        let mut leaf = format!("input {}", endpoint_token(&input.name));
+        if !input.summary.is_empty() {
+            leaf.push_str(" :summary ");
+            leaf.push_str(&render_string_literal(&input.summary));
+        }
+        if let Some(class) = &input.class {
+            leaf.push_str(" :class ");
+            leaf.push_str(&render_string_literal(class));
+        }
+        if let Some(default) = &input.default {
+            leaf.push_str(" :default ");
+            leaf.push_str(&render_string_literal(default));
+        }
+        if input.is_enumerated() {
+            let values: Vec<String> = input
+                .one_of
+                .iter()
+                .map(|v| render_string_literal(v))
+                .collect();
+            leaf.push_str(&format!(" :one-of ({})", values.join(" ")));
+        }
+        if input.required != input.default.is_none() {
+            leaf.push_str(&format!(" :required {}", input.required));
+        }
+        children.push(Block::leaf(leaf));
+    }
+    Ok(Block { header, children })
+}
+
 /// An endpoint name as the reader will read it back: a bare symbol when it is one, else a
 /// string.
 fn endpoint_token(name: &str) -> String {
@@ -1349,7 +1666,11 @@ impl Printer {
                 }
                 let mut rules = rules.clone();
                 in_table_order(&mut rules);
-                for rule in &rules {
+                for (i, rule) in rules.iter().enumerate() {
+                    if rule.is_named_request() {
+                        children.push(named_request(rule, &format!("{here} › rule {}", i + 1))?);
+                        continue;
+                    }
                     let mut leaf = format!(
                         "{} {} {}",
                         rule.kind.keyword(),

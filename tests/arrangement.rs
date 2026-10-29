@@ -17,11 +17,11 @@ use std::sync::Arc;
 
 use futures::executor::block_on;
 use ikigai_core::{
-    build, select_transreptor, Alias, AliasTable, ArgRef, AsyncFnEndpoint, Capability, Confine,
-    DeclarationBound, DeclarationError, Door, Endpoint, EndpointSpace, Exact, Fallback, FnEndpoint,
-    Iri, Kernel, Level, Limit, MatchKind, Mount, Registry, ReprType, Representation, Request,
-    RuleKind, Space, SpaceKind, Topology, TopologyRule, UriTemplate, Verb, DEFAULT_MAX_HOPS,
-    MAX_DECLARATION_DEPTH, MAX_DECLARATION_NODES, MAX_DECLARATION_TEXT,
+    build, select_transreptor, Alias, AliasTable, ArgRef, ArgSpec, AsyncFnEndpoint, Capability,
+    Confine, DeclarationBound, DeclarationError, Door, Endpoint, EndpointSpace, Exact, Fallback,
+    FixedArgument, FnEndpoint, Iri, Kernel, Level, Limit, MatchKind, Mount, Registry, ReprType,
+    Representation, Request, RuleKind, Space, SpaceKind, Topology, TopologyRule, UriTemplate, Verb,
+    DEFAULT_MAX_HOPS, MAX_DECLARATION_DEPTH, MAX_DECLARATION_NODES, MAX_DECLARATION_TEXT,
 };
 #[cfg(feature = "full")]
 use ikigai_core::{select_transreptor_with, TransreptionPolicy};
@@ -572,6 +572,251 @@ fn a_view_keeps_resolving_at_the_root() {
             .unwrap(),
         arrangement_to_topology("(alias (exact \"urn:a\" \"urn:b\") (fallback))").unwrap()
     );
+}
+
+/// An endpoint that answers its own name and the arguments it was given.
+fn hears(name: &'static str) -> Arc<dyn Endpoint> {
+    Arc::new(FnEndpoint::new(name, move |inv| {
+        let args: Vec<String> = inv
+            .request
+            .args
+            .iter()
+            .map(|(k, v)| match v {
+                ArgRef::Inline(bytes) => format!("{k}={}", String::from_utf8_lossy(bytes)),
+                other => format!("{k}={other:?}"),
+            })
+            .collect();
+        Ok(Representation::new(
+            ReprType::new("text/plain"),
+            format!("{name} {}", args.join(",")).into_bytes(),
+        ))
+    }))
+}
+
+/// A NAMED REQUEST — a binding with arguments, partial application of its target (ledger
+/// #2447, #2514) — is an alias rule of its own form, `(name "logical" (verb "target" arg
+/// value…) (input …)…)`: a names declaration with a fixed value, a reference and a template
+/// capture, and a declared input, goes around every loop through core's `Topology`, beside
+/// an ordinary rule.
+#[test]
+fn a_named_request_goes_around_every_loop() {
+    let (select, event, query) = (hears("select"), hears("event"), says("query"));
+    let registry = registry(&[&select, &event, &query]);
+    let count = TopologyRule::named_request("urn:quakes:count", "urn:x:select")
+        .verb(Verb::Source)
+        .fixing(FixedArgument::value("graph", "urn:quakes:graph"))
+        .fixing(FixedArgument::reference(
+            "query",
+            iri("urn:x:queries/count.rq"),
+        ))
+        .input(ArgSpec::new("as").default_value("text/plain"));
+    let quake = TopologyRule::named_template("urn:quakes:event:{id}", "urn:x:event")
+        .fixing(FixedArgument::capture("id", "id"))
+        .input(
+            ArgSpec::new("fields")
+                .summary("Which fields, \"all\" by default")
+                .one_of(["all", "brief"])
+                .optional(),
+        );
+    let table = AliasTable::new()
+        .exact("urn:old:select", "urn:x:select")
+        .with_rule(count)
+        .unwrap()
+        .with_rule(quake)
+        .unwrap();
+    let leaf = EndpointSpace::new()
+        .bind_arc(Exact::new("urn:x:select"), Arc::clone(&select))
+        .bind_arc(Exact::new("urn:x:event"), Arc::clone(&event))
+        .bind_arc(Exact::new("urn:x:queries/count.rq"), Arc::clone(&query));
+    let coded: Arc<dyn Space> = Arc::new(Alias::new(Arc::new(table), Arc::new(leaf)));
+    let tree = coded.topology();
+    round_trip(
+        coded,
+        &registry,
+        concat!(
+            "(alias\n",
+            "  (name \"urn:quakes:event:{id}\"\n",
+            "    (forward \"urn:x:event\" id (capture \"id\"))\n",
+            "    (input fields :summary \"Which fields, \\\"all\\\" by default\" :one-of (\"all\" \"brief\") :required false))\n",
+            "  (name \"urn:quakes:count\"\n",
+            "    (source \"urn:x:select\" graph \"urn:quakes:graph\" query (ref \"urn:x:queries/count.rq\"))\n",
+            "    (input as :default \"text/plain\"))\n",
+            "  (exact \"urn:old:select\" \"urn:x:select\")\n",
+            "  (endpoints\n",
+            "    (door \"urn:x:select\" select)\n",
+            "    (door \"urn:x:event\" event)\n",
+            "    (door \"urn:x:queries/count.rq\" query)))\n",
+        ),
+        &[
+            "urn:quakes:count",
+            "urn:quakes:event:42",
+            "urn:old:select",
+            "urn:x:select",
+        ],
+    );
+    // What the names mean reaches the target: the fixed value, the reference and the capture.
+    let text = topology_to_arrangement(&tree).unwrap();
+    let kernel = Kernel::new(build(&arrangement_to_topology(&text).unwrap(), &registry).unwrap());
+    assert_eq!(
+        answer(&kernel, "urn:quakes:count"),
+        "select as=text/plain,graph=urn:quakes:graph,\
+         query=Reference(Iri(\"urn:x:queries/count.rq\"))"
+    );
+    let quake = answer(&kernel, "urn:quakes:event:42");
+    assert_eq!(quake, "event id=42");
+}
+
+/// A named request has one spelling of each thing it says, and the others are the same
+/// arrangement: a `{` reads as a template, so `:match` is written only against that; a
+/// `forward` that fixes and declares nothing is a view; an input's `:required` is written
+/// only against "required unless it has a default".
+#[test]
+fn a_named_request_says_each_thing_once() {
+    let one = |text: &str| arrangement_to_topology(text).unwrap();
+    assert_eq!(
+        one("(alias (name \"urn:a:{id}\" :match template (source \"urn:b\")) (fallback))"),
+        one("(alias (name \"urn:a:{id}\" (source \"urn:b\")) (fallback))"),
+    );
+    assert_eq!(
+        one("(alias (name \"urn:a\" (forward \"urn:b\")) (fallback))"),
+        one("(alias (exact \"urn:a\" \"urn:b\" :resolve-at root) (fallback))"),
+    );
+    assert_eq!(
+        one("(alias (name \"urn:a\" (sink \"urn:b\") (input x :required true)) (fallback))"),
+        one("(alias (name \"urn:a\" (sink \"urn:b\") (input \"x\")) (fallback))"),
+    );
+    // A brace that is not a template is said so, and kept so.
+    let text = concat!(
+        "(alias\n",
+        "  (name \"urn:a:{x}\" :match exact\n",
+        "    (delete \"urn:b\" \"42\" \"v\"))\n",
+        "  (fallback))\n",
+    );
+    let tree = one(text);
+    assert_eq!(topology_to_arrangement(&tree).unwrap(), text);
+    assert_eq!(turtle_to_arrangement(&tree.to_turtle()).unwrap(), text);
+    // An empty enumeration accepts no value, and is not an open one.
+    let text = concat!(
+        "(alias\n",
+        "  (name \"urn:a\"\n",
+        "    (exists \"urn:b\")\n",
+        "    (input mode :class \"http://www.w3.org/2001/XMLSchema#string\" :one-of () :required false))\n",
+        "  (fallback))\n",
+    );
+    let tree = one(text);
+    assert_eq!(topology_to_arrangement(&tree).unwrap(), text);
+    assert_eq!(turtle_to_arrangement(&tree.to_turtle()).unwrap(), text);
+}
+
+#[test]
+fn a_named_request_core_would_refuse_is_refused_where_it_is() {
+    let at = "root (alias) › rule 1";
+    let request = "root (alias) › rule 1 › request";
+    let rule = |r: &str| format!("(alias {r} (fallback))");
+    refused(&rule("(name \"urn:a\")"), at, "missing the request");
+    refused(
+        &rule("(name \"urn:a\" (fetch \"urn:b\"))"),
+        request,
+        "found `(fetch …)`",
+    );
+    refused(
+        &rule("(name \"urn:a\" (source))"),
+        request,
+        "takes the name it forwards to",
+    );
+    refused(
+        &rule("(name \"urn:a\" (source \"urn:b\" graph))"),
+        request,
+        "has no value",
+    );
+    refused(
+        &rule("(name \"urn:a\" (source \"urn:b\" :graph \"g\"))"),
+        request,
+        "unknown option",
+    );
+    refused(
+        &rule("(name \"urn:a\" (source \"urn:b\" q (ref \"not an iri\")))"),
+        request,
+        "is not an IRI",
+    );
+    refused(
+        &rule("(name \"urn:a\" (source \"urn:b\" q 7))"),
+        request,
+        "is fixed to a string",
+    );
+    refused(
+        &rule("(name \"urn:a\" :match prefix (source \"urn:b\"))"),
+        at,
+        "one whole name",
+    );
+    refused(
+        &rule("(name \"urn:a\" (source \"urn:b\") (output x))"),
+        "root (alias) › rule 1 › input 1",
+        "only by `(input name …)`",
+    );
+    refused(
+        &rule("(name \"urn:a\" (source \"urn:b\") (input x :required maybe))"),
+        "root (alias) › rule 1 › input 1",
+        "`:required` is true or false",
+    );
+    // What core refuses, in core's words.
+    refused(
+        &rule("(name \"urn:a\" (source \"urn:b\" as \"text/csv\"))"),
+        at,
+        "fixes `as`",
+    );
+    refused(
+        &rule("(name \"urn:a:{id}\" (source \"urn:b\" id (capture \"x\")))"),
+        at,
+        "does not have",
+    );
+    refused(
+        &rule("(name \"urn:a\" (source \"urn:b\" x \"1\") (input x))"),
+        at,
+        "both fixes and declares",
+    );
+    refused(
+        &rule("(name \"urn:a\" (source \"urn:b\" x \"1\" x \"2\"))"),
+        at,
+        "twice",
+    );
+    refused(
+        &rule("(name \"urn:a\" :match template (source \"urn:b\"))"),
+        at,
+        "at least one {var}",
+    );
+    refused(
+        "(alias (name \"urn:a\" (source \"urn:b\")))",
+        "root (alias)",
+        "missing the space",
+    );
+
+    // The printer refuses what core cannot build, rather than print a different rule.
+    let alias = |rule: TopologyRule| {
+        Topology::new(SpaceKind::Alias {
+            rules: vec![rule],
+            max_hops: DEFAULT_MAX_HOPS,
+        })
+        .child(Topology::new(SpaceKind::Fallback))
+    };
+    for (rule, because) in [
+        (
+            TopologyRule::new(RuleKind::Exact, "urn:a", "urn:b").verb(Verb::Source),
+            "resolves from the root",
+        ),
+        (
+            TopologyRule::named_request("urn:a", "urn:b").verb(Verb::Meta),
+            "Source, Sink, Exists or Delete",
+        ),
+        (
+            TopologyRule::named_request("urn:a", "urn:b").input(ArgSpec::new("x").example("1")),
+            "more than a declaration states",
+        ),
+    ] {
+        let error = topology_to_arrangement(&alias(rule)).unwrap_err();
+        assert_eq!(error.at, at, "{error}");
+        assert!(error.reason.contains(because), "{error}");
+    }
 }
 
 // ---- refusals --------------------------------------------------------------------------
@@ -1211,11 +1456,52 @@ fn the_reader_counts_exactly_as_core_counts() {
         )
     };
 
+    // Named requests: each rule one node and each argument it fixes another, `n` rules.
+    let alias = |rules: Vec<TopologyRule>| {
+        Topology::new(SpaceKind::Alias {
+            rules,
+            max_hops: DEFAULT_MAX_HOPS,
+        })
+        .child(Topology::new(SpaceKind::Limit {
+            family: "urn:x:".into(),
+            kind: MatchKind::Prefix,
+        }))
+    };
+    let named = |n: usize| {
+        let rules: Vec<TopologyRule> = (0..n)
+            .map(|i| {
+                TopologyRule::named_request(format!("urn:a:{i:06}"), "urn:b")
+                    .fixing(FixedArgument::value("k", "v"))
+            })
+            .collect();
+        let text = rules
+            .iter()
+            .map(|r| format!("(name \"{}\" (forward \"urn:b\" k \"v\"))", r.from))
+            .collect::<Vec<_>>()
+            .join(" ");
+        (format!("(alias {text} (limit \"urn:x:\"))"), alias(rules))
+    };
+    // A declared input's text: one named request whose input's summary fills `n` bytes.
+    let summary = |n: usize| {
+        let summary = "s".repeat(n - "urn:a".len() - "urn:b".len() - "i".len() - "urn:x:".len());
+        let rule = TopologyRule::named_request("urn:a", "urn:b")
+            .input(ArgSpec::new("i").summary(summary.as_str()));
+        (
+            format!(
+                "(alias (name \"urn:a\" (forward \"urn:b\") (input i :summary \"{summary}\")) \
+                 (limit \"urn:x:\"))"
+            ),
+            alias(vec![rule]),
+        )
+    };
+
     type Shape<'a> = &'a dyn Fn(usize) -> (String, Topology);
-    let shapes: [(&str, Shape, usize); 3] = [
+    let shapes: [(&str, Shape, usize); 5] = [
         ("doors", &doors, MAX_DECLARATION_NODES - 1),
         ("rules", &rules, MAX_DECLARATION_NODES - 2),
+        ("named", &named, (MAX_DECLARATION_NODES - 2) / 2),
         ("text", &text, MAX_DECLARATION_TEXT),
+        ("summary", &summary, MAX_DECLARATION_TEXT),
     ];
     for (what, shape, largest) in shapes {
         let (text, tree) = shape(largest);
