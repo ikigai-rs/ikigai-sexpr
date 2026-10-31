@@ -302,3 +302,9 @@ arrangement surface are the only parts that touch `ikigai-core`.
 ## License
 
 Licensed under either of Apache License, Version 2.0 or MIT license at your option.
+
+## Accessibility
+
+What this crate emits that people read (s-expression, SPARQL and Turtle text, and error
+messages), the rules that output follows, how it is tested and how to report a barrier are in
+[ACCESSIBILITY.md](https://github.com/ikigai-rs/ikigai-sexpr/blob/main/ACCESSIBILITY.md).
