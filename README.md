@@ -38,6 +38,11 @@ s-expression; it is exact on a code-graph itself. Call any of the three by name,
 through it with the caller's consent; a plan that does reports the step as lossy. The
 code-graph encoder and the arrangement pair are lossless, and say so by saying nothing.
 
+**A plan for plain `text/turtle` from `text/x-sexpr` gets the code-graph.** `ikigai-core`
+compares media types and ignores a parameter only one side states (0.2.12), so `urn:sexpr:to-rdf`
+answers that request, with or without consent to loss, because a plan prefers a lossless route.
+For the triples a `(graph …)` denotes, call `urn:rdf:from-sexpr` by name.
+
 Each is backed by a pure function you can also call directly: `sexpr_to_sparql`,
 `sexpr_to_turtle`, `sexpr_to_rdf`, `rdf_to_sexpr` (kernel-free), and
 `arrangement_to_turtle`, `turtle_to_arrangement` (through `ikigai-core`'s `Topology`).
@@ -214,7 +219,7 @@ restated space instead of a `ref`, alias rules written out of table order). Back
 Turtle, an arrangement prints in the canonical form above.
 
 The media type is deliberately not `text/x-sexpr`: `urn:sexpr:to-rdf` already
-transrepts that to Turtle (and `urn:rdf:from-sexpr` does with consent), so a planner could
+transrepts that to Turtle (and `urn:rdf:from-sexpr` does by name), so a planner could
 hand the builder the wrong graph.
 
 **Bounded by core's bounds, in core's units.** An arrangement is held to
@@ -279,7 +284,7 @@ pair alone, and builds the crate without the default `full` feature, so nothing 
 compiled:
 
 ```toml
-ikigai-sexpr = { version = "0.3", default-features = false }
+ikigai-sexpr = { version = "0.4", default-features = false }
 ```
 ```rust,ignore
 let space = ikigai_sexpr::arrangement_space(); // urn:sexpr:arrangement-to-rdf / -from-rdf

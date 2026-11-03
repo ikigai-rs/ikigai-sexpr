@@ -15,8 +15,9 @@ use crate::{
 };
 
 /// The distinguishing output profile of the `urn:sexpr:to-rdf` code-graph. Same base media
-/// type as 3c's domain Turtle (`text/turtle`) but a distinct profile, so `urn:transrept:auto`
-/// can tell the lossless-structure transreption apart from the domain-graph one.
+/// type as 3c's domain Turtle (`text/turtle`) but a distinct profile, so a reader of the
+/// answer can tell the lossless-structure graph apart from a domain graph. Core's planner
+/// does not: it ignores a parameter only one side states (0.2.12, ledger #2163).
 const CODE_GRAPH_PROFILE: &str = "https://ikigai-rs.dev/ns/sexpr#code-graph";
 
 /// The `urn:sparql:from-sexpr` transreptor: read an s-expr query TEXT (piped `content`, or
@@ -148,9 +149,10 @@ impl Endpoint for FromSexprTurtle {
 /// Turtle. A first-class `ik:Transreptor` (`text/x-sexpr` → `text/turtle` with the
 /// **code-graph profile**). It shares `text/x-sexpr → text/turtle` with 3c's
 /// `urn:rdf:from-sexpr`, but that endpoint INTERPRETS a `(graph …)` form as domain triples
-/// while this one encodes the sexpr's STRUCTURE — the distinct output *profile* keeps the two
-/// unambiguous for `urn:transrept:auto` (a request for plain domain Turtle selects
-/// `urn:rdf:from-sexpr`; the code-graph is opt-in via the profile or explicit invocation).
+/// while this one encodes the sexpr's STRUCTURE — the distinct output *profile* tells a reader
+/// which it holds. Core's planner compares media types and ignores a parameter only one side
+/// states (0.2.12, ledger #2163), so this is the plan for plain `text/turtle` too, being the
+/// lossless one; domain triples come from invoking `urn:rdf:from-sexpr` by name.
 /// Pure function of its input bytes, so `.cacheable()`.
 pub(crate) struct ToRdf;
 

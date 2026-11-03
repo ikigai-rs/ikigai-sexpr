@@ -195,8 +195,8 @@ fn conforms() {
 /// Each endpoint here declares exactly ONE output, so the two directions collapse
 /// into one equality per endpoint — stated as a list so a second face added to any
 /// of them fails here until it is declared. Note `urn:sexpr:to-rdf` declares
-/// `text/turtle` WITH a `profile` parameter (the code-graph marker `urn:transrept:auto`
-/// disambiguates on) and serves the same type with the same parameter, so the
+/// `text/turtle` WITH a `profile` parameter (the code-graph marker a reader tells it
+/// apart by) and serves the same type with the same parameter, so the
 /// comparison is on the bare type — parameters are a refinement of a face, not a
 /// different one.
 #[test]
