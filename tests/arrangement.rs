@@ -30,7 +30,7 @@ use ikigai_sexpr::{
     turtle_to_arrangement, ArrangementError, MEDIA_ARRANGEMENT, MEDIA_TURTLE,
 };
 #[cfg(feature = "full")]
-use ikigai_sexpr::{space, MEDIA_SEXPR};
+use ikigai_sexpr::{parse, rdf_to_sexpr, space, MEDIA_SEXPR};
 
 fn iri(s: &str) -> Iri {
     Iri::parse(s).unwrap()
@@ -1593,28 +1593,46 @@ fn the_arrangement_space_alone_takes_an_arrangement_file_to_a_built_space() {
 }
 
 /// Beside every other surface, the plan still picks this crate's transreptor, and an
-/// s-expression that is NOT an arrangement never reaches this crate's reader: `text/x-sexpr`
-/// has no lossless route to plain Turtle at all (`urn:rdf:from-sexpr` interprets a
-/// `(graph …)`, so it is declared lossy, ledger #645), and with the caller's consent it plans
-/// to that one, reported lossy.
+/// s-expression that is NOT an arrangement never reaches this crate's reader. Its lossless
+/// route to Turtle is the code-graph: core compares media types and ignores a parameter only
+/// one side states (0.2.12, ledger #2163), so `urn:sexpr:to-rdf`'s profiled target answers a
+/// request for plain Turtle. That route is total and decodes back exactly. It does take
+/// precedence even with the caller's consent to loss: `urn:rdf:from-sexpr`, which interprets
+/// a `(graph …)` and is declared lossy (ledger #645), is now reached by name alone.
 #[cfg(feature = "full")]
 #[test]
 fn a_lossless_plan_takes_an_arrangement_file_to_a_built_space() {
     let root = host_path(Arc::new(space()));
-    assert_eq!(
-        select_transreptor(root.as_ref(), MEDIA_SEXPR, MEDIA_TURTLE),
-        None
-    );
-    let other = select_transreptor_with(
-        root.as_ref(),
-        MEDIA_SEXPR,
-        MEDIA_TURTLE,
-        &TransreptionPolicy::allow_lossy(),
-    )
-    .unwrap();
-    let hops: Vec<(&str, bool)> = other
+    let plan = select_transreptor(root.as_ref(), MEDIA_SEXPR, MEDIA_TURTLE).unwrap();
+    let hops: Vec<(&str, bool)> = plan
         .iter()
         .map(|s| (s.endpoint.as_str(), s.lossless))
         .collect();
-    assert_eq!(hops, [("urn:rdf:from-sexpr", false)]);
+    assert_eq!(hops, [("urn:sexpr:to-rdf", true)]);
+    assert_eq!(
+        select_transreptor_with(
+            root.as_ref(),
+            MEDIA_SEXPR,
+            MEDIA_TURTLE,
+            &TransreptionPolicy::allow_lossy(),
+        )
+        .unwrap(),
+        plan
+    );
+
+    // Following the plan encodes the datum's structure, whatever it is: a `(graph …)` comes
+    // back as itself, not as the triples it denotes, and a form no compiler accepts is no error.
+    let kernel = Kernel::new(Arc::clone(&root));
+    for document in ["(graph (ex:s ex:p ex:o))", "(nonsense 1 \"two\")"] {
+        let request = Request::new(Verb::Source, iri(&plan[0].endpoint))
+            .with_arg("content", ArgRef::Inline(document.as_bytes().to_vec()))
+            .with_arg("as", ArgRef::Inline(plan[0].to.clone().into_bytes()));
+        let answer = block_on(kernel.issue(request, &Capability::root())).unwrap();
+        assert_eq!(
+            answer.repr_type.params.get("profile").map(String::as_str),
+            Some("https://ikigai-rs.dev/ns/sexpr#code-graph")
+        );
+        let turtle = String::from_utf8(answer.bytes).unwrap();
+        assert_eq!(rdf_to_sexpr(&turtle).unwrap(), parse(document).unwrap());
+    }
 }

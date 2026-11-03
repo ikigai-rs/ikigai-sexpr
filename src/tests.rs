@@ -218,11 +218,31 @@ mod endpoint {
     };
     use std::sync::Arc;
 
-    /// A kernel binding the real `ikigai-sparql` module (all four query verbs) plus this
-    /// crate's `urn:sparql:from-sexpr` transreptor — so a compiled query runs end-to-end.
+    /// A kernel binding this crate's `urn:sparql:from-sexpr` transreptor.
     fn kernel() -> Kernel {
-        let space = ikigai_sparql::space().bind(Exact::new("urn:sparql:from-sexpr"), FromSexpr);
+        let space = EndpointSpace::new().bind(Exact::new("urn:sparql:from-sexpr"), FromSexpr);
         Kernel::new(Arc::new(space))
+    }
+
+    /// The real `ikigai-sparql` `urn:sparql:select`, on a kernel of its own core: no release
+    /// of it speaks core 0.3 yet (see the manifest), so only the query's text crosses over.
+    fn sparql_select(query: &str) -> String {
+        use ikigai_core_for_sparql as sparql_core;
+        let request = sparql_core::Request::new(
+            sparql_core::Verb::Source,
+            sparql_core::Iri::parse("urn:sparql:select").unwrap(),
+        )
+        .with_arg(
+            "query",
+            sparql_core::ArgRef::Inline(query.as_bytes().to_vec()),
+        );
+        let kernel = sparql_core::Kernel::new(Arc::new(ikigai_sparql::space()));
+        String::from_utf8(
+            block_on(kernel.issue(request, &sparql_core::Capability::root()))
+                .unwrap()
+                .bytes,
+        )
+        .unwrap()
     }
 
     fn source(iri: &str, arg: (&str, &[u8])) -> String {
@@ -260,7 +280,7 @@ mod endpoint {
                 b"(select (?s ?p ?o) (where (?s ?p ?o)) (limit 1))",
             ),
         );
-        let results = source("urn:sparql:select", ("query", sparql.as_bytes()));
+        let results = sparql_select(&sparql);
         assert!(
             results.contains("\"bindings\""),
             "expected sparql-results JSON, got: {results}"
@@ -1152,7 +1172,7 @@ mod code_graph_endpoints {
         let t = d.transreption().expect("to-rdf is an ik:Transreptor");
         assert_eq!(t.from, vec![MEDIA_SEXPR.to_string()]);
         // The distinguishing target: text/turtle WITH the code-graph profile (not plain
-        // text/turtle) — that is how urn:transrept:auto tells it from urn:rdf:from-sexpr.
+        // text/turtle) — that is how a reader tells its answer from urn:rdf:from-sexpr's.
         assert_eq!(t.to, vec![MEDIA_TURTLE_CODE_GRAPH.to_string()]);
         assert!(t.to[0].contains("profile="));
         assert_ne!(t.to[0], MEDIA_TURTLE, "must NOT collide with domain Turtle");

@@ -1,6 +1,6 @@
 [package]
 name = "ikigai-sexpr"
-version = "0.3.1"
+version = "0.4.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "Neutral, language-agnostic s-expression foundation for ikigai's portable-code arc: a `Sexpr` datum + reader/printer, pure kernel-free compilers (escaping/validation, never interpolation) turning s-exprs into SPARQL (`urn:sparql:from-sexpr` → application/sparql-query) and into an RDF graph as Turtle (`urn:rdf:from-sexpr` → text/turtle), and a kernel's arrangement as an s-expression, transrepted losslessly to and from the ik: Turtle core builds a space from (`urn:sexpr:arrangement-to-rdf`, text/x-ikigai-arrangement) — with no lisp engine at all."
@@ -15,9 +15,12 @@ categories = ["compilers", "parser-implementations"]
 # the old 0.1 pin meant <0.2.0 and could not pick up this release.
 # 0.2.5 carries named requests on `TopologyRule` (ledger #2512), which the
 # arrangement's `(name …)` rule form round-trips (ledger #2514).
+# 0.3.0 is the scoped content store (ledger #2965): held content answers whoever delivered
+# it, and `ContentStore::put`/`put_replay` are root-only. This crate calls neither, but its
+# public API speaks core types, so it moves with core.
 # `declare` supplies the arrangement surface's Topology reader and bounds.
 # The datum, reader, printer, and SPARQL/Turtle compilers stay kernel-free.
-ikigai-core = { version = "0.2.5", features = ["declare"] }
+ikigai-core = { version = "0.3.0", features = ["declare"] }
 async-trait = "0.1"
 
 # Slice 3c.2 lossless code-as-graph: the encoder content-addresses cons cells with a
@@ -54,13 +57,17 @@ full = ["dep:sha2", "dep:oxrdf", "dep:oxrdfio"]
 [dev-dependencies]
 futures = "0.3" # block_on for the async endpoint test
 # The module recipe walks every endpoint, including BODIES and BODY-INPUTS.
-ikigai-conformance = "0.12.0"
-# 0.2.0 is the streams release (ledger #2261). Under 0.x caret rules,
-# the old 0.1 pin meant <0.2.0 and could not pick up this release.
-ikigai-vocab = "0.2.0"
-# The real SPARQL engine proves emitted queries run end-to-end. 0.3.0 is
-# the newest release and depends on core 0.2.0, sharing the kernel's types.
+# 0.14.0 is the conformance release on core 0.3 (the scoped content store, ledger #2965).
+ikigai-conformance = "0.14.0"
+# Moves with core: 0.3.0 is the vocabulary release on core 0.3 (ledger #2965).
+ikigai-vocab = "0.3.0"
+# The real SPARQL engine proves emitted queries run end-to-end. No release of it is on core
+# 0.3 yet (the newest, 0.4.0, requires core ^0.2.9), so it keeps this pin and brings core 0.2
+# into the TEST build only; `ikigai-core-for-sparql` names that core so the test can drive the
+# engine on a kernel of its own. Only the query's text crosses between the two. When
+# ikigai-sparql ships on core 0.3, move it there, drop this alias and bind it in one kernel.
 ikigai-sparql = "0.3.0"
+ikigai-core-for-sparql = { package = "ikigai-core", version = "0.2.0" }
 # `oxrdf`/`oxrdfio` (the Oxigraph Turtle parser the graph tests re-parse output with) are
 # now runtime deps — see [dependencies] — so no dev-only entry is needed. The 3c validity
 # tests and the 3c.2 round-trip/content-addressing tests re-parse output from there.
