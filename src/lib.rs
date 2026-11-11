@@ -153,7 +153,7 @@ pub const MEDIA_TURTLE_CODE_GRAPH: &str =
 /// and other bare tokens; only these four cases are needed to express a SPARQL SELECT.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Sexpr {
-    /// A bare symbol: `select`, `where`, `?s`, `rdf:type`, `a`, `*`, …
+    /// A symbol: bare (`select`, `?s`, `rdf:type`, …) or quoted (`#"42"`).
     Symbol(String),
     /// A double-quoted string literal (its decoded contents, without the quotes).
     Str(String),
@@ -276,14 +276,22 @@ impl SizeBudget {
     /// Charge one node carrying `text` bytes of atom text (0 for a list or an integer).
     pub(crate) fn charge(&mut self, text: usize) -> SexprResult<()> {
         self.nodes = self.nodes.saturating_add(1);
-        self.text = self.text.saturating_add(text);
         let subject = self.subject;
         if self.nodes > MAX_SEXPR_NODES {
             Err(SexprError::Parse(format!(
                 "{subject} more than {MAX_SEXPR_NODES} s-expression nodes (the size limit, \
                  the same for the reader and the code-graph decoder)"
             )))
-        } else if self.text > MAX_SEXPR_TEXT {
+        } else {
+            self.charge_text(text)
+        }
+    }
+
+    /// Charge decoded atom text before copying it into an owned string.
+    fn charge_text(&mut self, text: usize) -> SexprResult<()> {
+        self.text = self.text.saturating_add(text);
+        let subject = self.subject;
+        if self.text > MAX_SEXPR_TEXT {
             Err(SexprError::Parse(format!(
                 "{subject} more than {MAX_SEXPR_TEXT} bytes of s-expression text (the size \
                  limit, the same for the reader and the code-graph decoder)"
@@ -297,6 +305,8 @@ impl SizeBudget {
 /// Parse exactly one top-level s-expression from `src`. Whitespace and `;` line comments
 /// are skipped. Errors on an empty input, unbalanced parens, an unterminated string, or
 /// trailing tokens after the first form (use [`parse_all`] for a stream of forms).
+/// Symbols that need quoting use `#"…"`, with the same escapes as strings. A `#`
+/// immediately followed by `"` starts a quoted symbol; other `#` tokens stay bare symbols.
 ///
 /// Bounded, like every reader of caller input in this crate: refused past 512 nested lists,
 /// past 1,048,576 nodes (every atom and every list), or past 32 MiB of symbol and string
@@ -340,34 +350,32 @@ pub fn parse_all(src: &str) -> SexprResult<Vec<Sexpr>> {
 
 /// A char cursor over the source. Char-based (not byte-based) so multi-byte UTF-8 inside
 /// string literals and symbols is handled without index gymnastics.
-struct Reader {
-    chars: Vec<char>,
-    pos: usize,
+struct Reader<'a> {
+    chars: std::str::Chars<'a>,
     /// Every form read so far, across the whole input ([`MAX_SEXPR_NODES`]).
     budget: SizeBudget,
 }
 
-impl Reader {
-    fn new(src: &str) -> Self {
+impl<'a> Reader<'a> {
+    fn new(src: &'a str) -> Self {
         Reader {
-            chars: src.chars().collect(),
-            pos: 0,
+            chars: src.chars(),
             budget: SizeBudget::new("s-expression holds"),
         }
     }
 
     fn peek(&self) -> Option<char> {
-        self.chars.get(self.pos).copied()
+        self.chars.clone().next()
     }
 
     /// Skip whitespace and `;` line comments.
     fn skip_trivia(&mut self) {
         while let Some(c) = self.peek() {
             if c.is_whitespace() {
-                self.pos += 1;
+                self.chars.next();
             } else if c == ';' {
                 while let Some(c) = self.peek() {
-                    self.pos += 1;
+                    self.chars.next();
                     if c == '\n' {
                         break;
                     }
@@ -388,7 +396,11 @@ impl Reader {
             Some(')') => Err(SexprError::Parse(
                 "unexpected `)` — unbalanced parens".to_string(),
             )),
-            Some('"') => self.read_string().map(Some),
+            Some('"') => self.read_string().map(Sexpr::Str).map(Some),
+            Some('#') if self.chars.as_str().starts_with("#\"") => {
+                self.chars.next(); // consume '#'; read_string consumes the quotes
+                self.read_string().map(Sexpr::Symbol).map(Some)
+            }
             Some(_) => self.read_atom().map(Some),
         }
     }
@@ -402,7 +414,7 @@ impl Reader {
             )));
         }
         self.budget.charge(0)?;
-        self.pos += 1; // consume '('
+        self.chars.next(); // consume '('
         let mut items = Vec::new();
         loop {
             self.skip_trivia();
@@ -413,7 +425,7 @@ impl Reader {
                     ))
                 }
                 Some(')') => {
-                    self.pos += 1; // consume ')'
+                    self.chars.next(); // consume ')'
                     return Ok(Sexpr::List(items));
                 }
                 // peek is Some, so read_form yields Some — but stay total.
@@ -428,61 +440,63 @@ impl Reader {
 
     /// Read a `"…"` string literal, decoding `\\ \" \n \r \t` escapes (an unknown `\c`
     /// decodes to the literal `c`). Errors on an unterminated string.
-    fn read_string(&mut self) -> SexprResult<Sexpr> {
-        self.pos += 1; // consume opening '"'
+    fn read_string(&mut self) -> SexprResult<String> {
+        self.chars.next(); // consume opening '"'
+        self.budget.charge(0)?;
         let mut out = String::new();
         loop {
-            match self.peek() {
+            let c = match self.peek() {
                 None => return Err(SexprError::Parse("unterminated string literal".to_string())),
                 Some('"') => {
-                    self.pos += 1; // consume closing '"'
-                    self.budget.charge(out.len())?;
-                    return Ok(Sexpr::Str(out));
+                    self.chars.next(); // consume closing '"'
+                    return Ok(out);
                 }
                 Some('\\') => {
-                    self.pos += 1;
+                    self.chars.next();
                     match self.peek() {
                         None => {
                             return Err(SexprError::Parse(
                                 "unterminated escape at end of string".to_string(),
                             ))
                         }
-                        Some('n') => out.push('\n'),
-                        Some('r') => out.push('\r'),
-                        Some('t') => out.push('\t'),
-                        Some('\\') => out.push('\\'),
-                        Some('"') => out.push('"'),
-                        Some(other) => out.push(other), // unknown escape → the literal char
+                        Some('n') => '\n',
+                        Some('r') => '\r',
+                        Some('t') => '\t',
+                        Some(other) => other, // unknown escape → the literal char
                     }
-                    self.pos += 1;
                 }
-                Some(c) => {
-                    out.push(c);
-                    self.pos += 1;
-                }
-            }
+                Some(c) => c,
+            };
+            self.budget.charge_text(c.len_utf8())?;
+            out.push(c);
+            self.chars.next();
         }
     }
 
     /// Read a bare atom up to the next delimiter (whitespace, paren, quote, `;`, EOF).
     /// Classifies as [`Sexpr::Int`] when it parses as an `i64`, else [`Sexpr::Symbol`].
     fn read_atom(&mut self) -> SexprResult<Sexpr> {
-        let start = self.pos;
+        let start = self.chars.as_str();
         while let Some(c) = self.peek() {
-            if c.is_whitespace() || matches!(c, '(' | ')' | '"' | ';') {
+            if is_atom_delimiter(c) {
                 break;
             }
-            self.pos += 1;
+            self.chars.next();
         }
-        let token: String = self.chars[start..self.pos].iter().collect();
+        let token = &start[..start.len() - self.chars.as_str().len()];
         if let Ok(n) = token.parse::<i64>() {
             self.budget.charge(0)?;
             Ok(Sexpr::Int(n))
         } else {
             self.budget.charge(token.len())?;
-            Ok(Sexpr::Symbol(token))
+            Ok(Sexpr::Symbol(token.to_string()))
         }
     }
+}
+
+/// Characters that end a bare symbol or integer.
+fn is_atom_delimiter(c: char) -> bool {
+    c.is_whitespace() || matches!(c, '(' | ')' | '"' | ';')
 }
 
 // =====================================================================================
@@ -490,9 +504,9 @@ impl Reader {
 // =====================================================================================
 
 /// Print a [`Sexpr`] as canonical s-expression text. `parse(&write(x)) == x` for any
-/// datum the reader can produce (the reader never yields a symbol that the printer would
-/// re-tokenize differently). String literals are escaped so the printed form re-reads to
-/// the same contents.
+/// datum within the reader's depth and size limits. Symbols that are empty, contain
+/// delimiters, or would be read as integers use `#"…"`. Quoted symbols and strings share
+/// the same escaping, so both re-read to the same contents.
 pub fn write(sexpr: &Sexpr) -> String {
     let mut out = String::new();
     write_into(sexpr, &mut out);
@@ -501,7 +515,14 @@ pub fn write(sexpr: &Sexpr) -> String {
 
 fn write_into(sexpr: &Sexpr, out: &mut String) {
     match sexpr {
-        Sexpr::Symbol(s) => out.push_str(s),
+        Sexpr::Symbol(s) => {
+            if s.is_empty() || s.parse::<i64>().is_ok() || s.chars().any(is_atom_delimiter) {
+                out.push('#');
+                out.push_str(&render_string_literal(s));
+            } else {
+                out.push_str(s);
+            }
+        }
         Sexpr::Int(n) => out.push_str(&n.to_string()),
         Sexpr::Str(s) => out.push_str(&render_string_literal(s)),
         Sexpr::List(items) => {
@@ -869,9 +890,12 @@ fn valid_pn_prefix(pfx: &str) -> bool {
 
 /// A conservative SPARQL local name: word characters and hyphens (may be empty).
 fn valid_pn_local(local: &str) -> bool {
-    local
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    let mut chars = local.chars();
+    // PN_LOCAL permits a digit or underscore at the start, but a hyphen only later.
+    chars
+        .next()
+        .is_none_or(|c| c.is_ascii_alphanumeric() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
 /// A compile-time error from either compiler — never a panic.
@@ -1082,7 +1106,13 @@ fn render_lit_form(args: &[&Sexpr]) -> SexprResult<String> {
         // Language tag: a symbol `@subtag` (letters/digits/hyphen after the `@`).
         Sexpr::Symbol(tag) if tag.starts_with('@') => {
             let sub = &tag[1..];
-            if sub.is_empty() || !sub.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+            let mut parts = sub.split('-');
+            let first = parts.next().unwrap_or("");
+            if first.is_empty()
+                || !first.chars().all(|c| c.is_ascii_alphabetic())
+                || !parts
+                    .all(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_alphanumeric()))
+            {
                 return Err(compile_err(&format!("invalid language tag `{tag}`")));
             }
             Ok(format!("{value}{tag}"))

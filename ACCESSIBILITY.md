@@ -56,6 +56,10 @@ Followed by reading the source:
 - `src/tests.rs` checks that malformed input is an error and not a panic
   (`unbalanced_parens_are_errors`, `a_malformed_sexpr_is_a_clean_endpoint_error`); it does not
   check the wording.
+- `tests/reader_audit.rs` checks that an unterminated string names the text bound,
+  quoted symbols and strings preserve their text, and malformed local names and language
+  tags are refused. It compares reader nesting with ikigai-ui's quote/comment pre-scan and
+  runs deep reader probes in a child process on a 2 MiB thread.
 - **No automated accessibility checker, browser or assistive technology has been used on this
   output.**
 
