@@ -15,6 +15,15 @@ pub fn parse(&str) -> SexprResult<Sexpr>;          // text  -> datum
 pub fn write(&Sexpr) -> String;                    // datum -> text
 ```
 
+Symbols that are empty, contain delimiters, or look like integers are printed as
+`#"…"`, using the same escapes as strings: `#"42"` is a symbol, `"42"` is a string,
+and `42` is an integer. Bare keywords such as `:id` stay symbols. A `#` immediately
+followed by `"` now starts a quoted symbol; write `# "text"` with whitespace when
+you mean two forms (the symbol `#` and a string). Only `;` line comments are
+supported; quote punctuation and `#|` are ordinary symbol text, with no reader
+expansion. The reader borrows its source and charges decoded string text before
+copying it, including for an unterminated string.
+
 ## The six surfaces
 
 | endpoint | transreption | declared | what it does |
