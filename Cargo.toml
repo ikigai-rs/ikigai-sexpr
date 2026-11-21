@@ -64,13 +64,10 @@ ikigai-conformance = "0.15.0"
 # Moves with core: 0.4.0 is the vocabulary release on core 0.4.0 (scope opacity, structured
 # denials; the cascade, epic #3893).
 ikigai-vocab = "0.4.0"
-# The real SPARQL engine proves emitted queries run end-to-end. No release of it is on core
-# 0.3 yet (the newest, 0.4.0, requires core ^0.2.9), so it keeps this pin and brings core 0.2
-# into the TEST build only; `ikigai-core-for-sparql` names that core so the test can drive the
-# engine on a kernel of its own. Only the query's text crosses between the two. When
-# ikigai-sparql ships on core 0.3, move it there, drop this alias and bind it in one kernel.
-ikigai-sparql = "0.3.0"
-ikigai-core-for-sparql = { package = "ikigai-core", version = "0.2.0" }
+# The real SPARQL engine proves emitted queries run end-to-end. 0.6.0 is its release on core
+# 0.4 (scope opacity, structured denials; the cascade, epic #3893), so the test binds its space
+# in the same kernel as this crate's own: the test build has ONE core.
+ikigai-sparql = "0.6.0"
 # `oxrdf`/`oxrdfio` (the Oxigraph Turtle parser the graph tests re-parse output with) are
 # now runtime deps — see [dependencies] — so no dev-only entry is needed. The 3c validity
 # tests and the 3c.2 round-trip/content-addressing tests re-parse output from there.
