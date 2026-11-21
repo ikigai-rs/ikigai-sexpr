@@ -214,35 +214,23 @@ mod endpoint {
     use super::*;
     use futures::executor::block_on;
     use ikigai_core::{
-        ArgRef, Capability, InputSource, Iri, Kernel, Request, Resolution, Scope, Space,
+        ArgRef, Capability, Fallback, InputSource, Iri, Kernel, Request, Resolution, Scope, Space,
     };
     use std::sync::Arc;
 
-    /// A kernel binding this crate's `urn:sparql:from-sexpr` transreptor.
+    /// One kernel over this crate's `urn:sparql:from-sexpr` transreptor and the real
+    /// `ikigai-sparql` space (`urn:sparql:select`), both on the same core.
     fn kernel() -> Kernel {
         let space = EndpointSpace::new().bind(Exact::new("urn:sparql:from-sexpr"), FromSexpr);
-        Kernel::new(Arc::new(space))
+        Kernel::new(Arc::new(Fallback::new(vec![
+            Arc::new(space),
+            Arc::new(ikigai_sparql::space()),
+        ])))
     }
 
-    /// The real `ikigai-sparql` `urn:sparql:select`, on a kernel of its own core: no release
-    /// of it speaks core 0.3 yet (see the manifest), so only the query's text crosses over.
+    /// Run `query` through `urn:sparql:select` in the same kernel as the transreptor.
     fn sparql_select(query: &str) -> String {
-        use ikigai_core_for_sparql as sparql_core;
-        let request = sparql_core::Request::new(
-            sparql_core::Verb::Source,
-            sparql_core::Iri::parse("urn:sparql:select").unwrap(),
-        )
-        .with_arg(
-            "query",
-            sparql_core::ArgRef::Inline(query.as_bytes().to_vec()),
-        );
-        let kernel = sparql_core::Kernel::new(Arc::new(ikigai_sparql::space()));
-        String::from_utf8(
-            block_on(kernel.issue(request, &sparql_core::Capability::root()))
-                .unwrap()
-                .bytes,
-        )
-        .unwrap()
+        source("urn:sparql:select", ("query", query.as_bytes()))
     }
 
     fn source(iri: &str, arg: (&str, &[u8])) -> String {
@@ -710,6 +698,10 @@ mod code_graph {
                 Term::NamedNode(n) => n.as_str().to_string(),
                 Term::Literal(l) => format!("LIT[{}]{}", l.datatype().as_str(), l.value()),
                 Term::BlankNode(b) => format!("_:{}", b.as_str()),
+                // `ikigai-sparql` (dev-only) turns on oxrdf's RDF 1.2 triple terms through
+                // feature unification; the code-graph never emits one.
+                #[allow(unreachable_patterns)]
+                other => panic!("unexpected object term in a code-graph: {other}"),
             };
             out.push((s, q.predicate.as_str().to_string(), o));
         }
