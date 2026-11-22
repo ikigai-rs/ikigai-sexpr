@@ -31,7 +31,8 @@
 //! (select (?a ?b …) | *          ; projection: a var list, or * for all
 //!   (prefix (rdf "http://…") …)   ; optional PREFIX lines
 //!   (where (S P O) …)             ; triple patterns; S/P/O = ?var | (iri "…")
-//!                                 ;   | pfx:local | "string" | integer | a
+//!                                 ;   | pfx:local; P also accepts a, O also accepts
+//!                                 ;   | "string" | integer
 //!   (order-by ?v (desc ?w) …)     ; optional
 //!   (limit N))                    ; optional
 //! ```
@@ -52,8 +53,8 @@
 //!   (ex:alice foaf:name (lit "Alix" @fr)))         ;       | (lit "v" @lang)  language-tagged
 //! ```
 //!
-//! The head symbol must be `graph`. `a` in predicate position renders as `rdf:type` and
-//! auto-binds the `rdf:` prefix. **No blank nodes** — a `_:x` form is rejected; every node
+//! The head symbol must be `graph`. `a` in predicate position denotes `rdf:type` independently
+//! of any `rdf:` prefix binding. **No blank nodes** — a `_:x` form is rejected; every node
 //! must be a stable IRI (skolemize). The emitted Turtle is canonical: `@prefix` lines, then
 //! one `S P O .` statement per triple, each newline-terminated. It always parses as RDF.
 
@@ -128,7 +129,8 @@ pub const MEDIA_TURTLE: &str = "text/turtle";
 /// The XSD `string` datatype IRI — the `class` of the s-expression input.
 const XSD_STRING: &str = "http://www.w3.org/2001/XMLSchema#string";
 
-/// The RDF namespace — auto-bound as the `rdf:` prefix when `a` (→ `rdf:type`) is used.
+/// The RDF namespace used by the code-graph codec.
+#[cfg(feature = "full")]
 const RDF_NS: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#";
 
 // --- slice 3c.2: the lossless code-as-graph vocabulary (self-contained in this crate) ---
@@ -667,7 +669,7 @@ fn compile_triple(value: &Sexpr) -> SexprResult<String> {
             "a triple must have exactly three terms (S P O)",
         ));
     }
-    let s = render_term(terms[0])?;
+    let s = render_sparql_iri_or_var(terms[0], "subject")?;
     let p = render_predicate(terms[1])?;
     let o = render_term(terms[2])?;
     Ok(format!("{s} {p} {o} ."))
@@ -764,12 +766,22 @@ fn render_term(value: &Sexpr) -> SexprResult<String> {
     }
 }
 
-/// A predicate term: like [`render_term`], but also accepting the bare `a` keyword.
+/// A subject or predicate must be an IRI or variable, not a literal.
+fn render_sparql_iri_or_var(value: &Sexpr, role: &str) -> SexprResult<String> {
+    match value {
+        Sexpr::Str(_) | Sexpr::Int(_) => Err(compile_err(&format!(
+            "a {role} must be an IRI or variable, not a literal"
+        ))),
+        _ => render_term(value),
+    }
+}
+
+/// A predicate term: an IRI, variable, or the bare `a` keyword.
 fn render_predicate(value: &Sexpr) -> SexprResult<String> {
     if symbol_name(value) == Some("a") {
         return Ok("a".to_string());
     }
-    render_term(value)
+    render_sparql_iri_or_var(value, "predicate")
 }
 
 /// A symbol used as a term: either a `?variable` or a `pfx:local` prefixed name.
@@ -919,7 +931,7 @@ fn compile_err(msg: &str) -> SexprError {
 /// The accepted grammar is documented on the [crate] docs. The head symbol must be
 /// `graph`; an unknown head, a malformed clause/triple, a blank-node form, or an
 /// unsupported term yields an `Err`. Output is canonical: `@prefix` lines (in declaration
-/// order, plus an auto-bound `rdf:` if `a`/`rdf:type` is used), then one newline-terminated
+/// order), then one newline-terminated
 /// `S P O .` statement per triple.
 pub fn sexpr_to_turtle(value: &Sexpr) -> SexprResult<String> {
     let items = list_items(value)
@@ -941,9 +953,7 @@ pub fn sexpr_to_turtle(value: &Sexpr) -> SexprResult<String> {
 /// (never a valid subject, so the dispatch is unambiguous); every other form is a triple.
 fn compile_graph(rest: &[&Sexpr]) -> SexprResult<String> {
     let mut prefix_lines: Vec<String> = Vec::new();
-    let mut declared_rdf = false;
     let mut triples: Vec<String> = Vec::new();
-    let mut used_rdf_type = false;
 
     for form in rest {
         let fitems = list_items(form).ok_or_else(|| {
@@ -951,21 +961,12 @@ fn compile_graph(rest: &[&Sexpr]) -> SexprResult<String> {
         })?;
         if fitems.first().and_then(|v| symbol_name(v)) == Some("prefix") {
             for binding in &fitems[1..] {
-                let (pfx, line) = compile_turtle_prefix(binding)?;
-                if pfx == "rdf" {
-                    declared_rdf = true;
-                }
+                let (_, line) = compile_turtle_prefix(binding)?;
                 prefix_lines.push(line);
             }
         } else {
-            triples.push(compile_graph_triple(&fitems, &mut used_rdf_type)?);
+            triples.push(compile_graph_triple(&fitems)?);
         }
-    }
-
-    // `a`/`rdf:type` was used but the author didn't declare `rdf:` — auto-bind it, so the
-    // emitted Turtle is self-contained and parses.
-    if used_rdf_type && !declared_rdf {
-        prefix_lines.push(format!("@prefix rdf: <{RDF_NS}> ."));
     }
 
     let mut out = String::new();
@@ -1001,16 +1002,15 @@ fn compile_turtle_prefix(value: &Sexpr) -> SexprResult<(String, String)> {
     Ok((pfx.to_string(), format!("@prefix {pfx}: {iri} .")))
 }
 
-/// A single triple `(S P O)` → `S P O .`. Sets `used_rdf_type` when the `a` predicate
-/// keyword is encountered (so the caller can auto-bind `rdf:`).
-fn compile_graph_triple(terms: &[&Sexpr], used_rdf_type: &mut bool) -> SexprResult<String> {
+/// A single triple `(S P O)` → `S P O .`.
+fn compile_graph_triple(terms: &[&Sexpr]) -> SexprResult<String> {
     if terms.len() != 3 {
         return Err(compile_err(
             "a triple must have exactly three terms (S P O)",
         ));
     }
     let s = render_graph_iri(terms[0], "subject")?;
-    let p = render_graph_predicate(terms[1], used_rdf_type)?;
+    let p = render_graph_predicate(terms[1])?;
     let o = render_graph_object(terms[2])?;
     Ok(format!("{s} {p} {o} ."))
 }
@@ -1057,11 +1057,10 @@ fn render_graph_iri(value: &Sexpr, role: &str) -> SexprResult<String> {
     }
 }
 
-/// A predicate node: the bare `a` keyword (→ `rdf:type`, flagging `used_rdf_type`) or an IRI.
-fn render_graph_predicate(value: &Sexpr, used_rdf_type: &mut bool) -> SexprResult<String> {
+/// A predicate node: the bare `a` keyword (→ `rdf:type`) or an IRI.
+fn render_graph_predicate(value: &Sexpr) -> SexprResult<String> {
     if symbol_name(value) == Some("a") {
-        *used_rdf_type = true;
-        return Ok("rdf:type".to_string());
+        return Ok("a".to_string());
     }
     render_graph_iri(value, "predicate")
 }

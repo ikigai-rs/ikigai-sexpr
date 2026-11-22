@@ -406,9 +406,8 @@ fn compiles_a_basic_graph_to_exact_turtle() {
 }
 
 #[test]
-fn a_predicate_becomes_rdf_type_and_auto_binds_rdf() {
-    // `a` renders as rdf:type; the rdf: prefix is auto-bound (after the author's prefixes)
-    // so the emitted Turtle is self-contained. The subject is a full (iri "…").
+fn a_predicate_uses_the_turtle_keyword() {
+    // Turtle resolves `a` to rdf:type without a prefix declaration.
     let g = parse(
         r#"(graph
              (prefix (foaf "http://xmlns.com/foaf/0.1/"))
@@ -418,14 +417,13 @@ fn a_predicate_becomes_rdf_type_and_auto_binds_rdf() {
     assert_eq!(
         sexpr_to_turtle(&g).unwrap(),
         "@prefix foaf: <http://xmlns.com/foaf/0.1/> .\n\
-         @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .\n\
-         <http://example.org/alice> rdf:type foaf:Person .\n"
+         <http://example.org/alice> a foaf:Person .\n"
     );
 }
 
 #[test]
 fn an_author_declared_rdf_prefix_is_not_duplicated() {
-    // If the author already binds rdf:, `a` reuses it — no duplicate @prefix line.
+    // An explicit rdf: binding is preserved alongside the `a` keyword.
     let g = parse(
         r#"(graph
              (prefix (ex "http://example.org/") (rdf "http://www.w3.org/1999/02/22-rdf-syntax-ns#"))
@@ -436,7 +434,7 @@ fn an_author_declared_rdf_prefix_is_not_duplicated() {
         sexpr_to_turtle(&g).unwrap(),
         "@prefix ex: <http://example.org/> .\n\
          @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .\n\
-         ex:a rdf:type ex:Thing .\n"
+         ex:a a ex:Thing .\n"
     );
 }
 
