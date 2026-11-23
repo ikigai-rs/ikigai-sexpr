@@ -75,7 +75,7 @@ and inject query syntax.
   (ex:alice a ex:Person)
   (ex:alice ex:name "Alice"))
 ```
-compiles to Turtle (skolemized — no blank nodes; `a` auto-binds `rdf:`).
+compiles to Turtle (skolemized — no blank nodes; `a` denotes `rdf:type`).
 
 ## Code as a graph (lossless, content-addressed)
 
